@@ -1,0 +1,12 @@
+services:
+
+  bot:
+    build: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # URL основного API-сервиса (укажите реальный адрес)
+      BACKEND_URL: ${BACKEND_URL:-http://api:8000}
+
+volumes: {}
