@@ -7,6 +7,6 @@ services:
       - .env
     environment:
       # URL основного API-сервиса (укажите реальный адрес)
-      BACKEND_URL: ${BACKEND_URL:-http://api:8000}
+      BACKEND_URL: ${BACKEND_URL:-https://simulatorfordoctorsfastapi-api-production.up.railway.app/docs#/}
 
 volumes: {}

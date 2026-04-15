@@ -11,21 +11,17 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiogram.fsm.storage.memory import MemoryStorage
 
+from config import get_settings, setup_logging
 from telegram.handlers.menu import router as menu_router
 from telegram.handlers.dialog import router as dialog_router
 from telegram.handlers.training import router as training_router
 from telegram.handlers.admin import router as admin_router
 from telegram.keyboards.inline import set_bot_commands
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    stream=sys.stdout,
-)
+settings = get_settings()
+setup_logging(settings.log_level)
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-if not BOT_TOKEN:
-    sys.exit("Ошибка: задайте BOT_TOKEN.\nПример: BOT_TOKEN=токен python -m telegram.bot")
+BOT_TOKEN = settings.bot_token
 
 # Lock-файл для одного инстанса бота
 LOCK_FILE = "/tmp/bfu_bot.lock"

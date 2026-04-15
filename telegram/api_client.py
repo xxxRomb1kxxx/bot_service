@@ -3,14 +3,15 @@ HTTP-клиент к FastAPI-бэкенду.
 Единая сессия aiohttp, понятные исключения BackendError.
 """
 import logging
-import os
 import ssl
 import aiohttp
 from aiohttp import TCPConnector
 
+from config import get_settings
+
 logger = logging.getLogger(__name__)
 
-BACKEND_URL = os.environ.get("BACKEND_URL", "http://localhost:8000")
+BACKEND_URL = get_settings().backend_url
 
 ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False
