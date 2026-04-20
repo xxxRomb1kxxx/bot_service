@@ -2,11 +2,11 @@ services:
 
   bot:
     build: .
+    # Для Railway через Docker Hub — раскомментировать image, закомментировать build:
+    # image: YOUR_DOCKERHUB_USER/simulator-bot:latest
     restart: unless-stopped
     env_file:
       - .env
     environment:
-      # URL основного API-сервиса (укажите реальный адрес)
-      BACKEND_URL: ${BACKEND_URL:-https://simulatorfordoctorsfastapi-api-production.up.railway.app/docs#/}
-
-volumes: {}
+      BACKEND_URL: ${BACKEND_URL:-https://simulatorfordoctorsfastapi-api-production.up.railway.app}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}

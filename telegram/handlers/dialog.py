@@ -53,30 +53,30 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
         await state.clear()
         return
 
+    placeholder = await msg.answer("⏳")
+
     try:
         result = await api.send_message(session_id, msg.text or "")
     except api.BackendError as e:
         if e.status == 409:
             await state.clear()
-            await msg.answer("Сессия уже завершена. Начните новый кейс через /start")
+            await placeholder.edit_text("Сессия уже завершена. Начните новый кейс через /start")
         elif e.status == 404:
             await state.clear()
-            await msg.answer("Сессия не найдена. Начните новый кейс через /start")
+            await placeholder.edit_text("Сессия не найдена. Начните новый кейс через /start")
         elif e.status == 422:
-            # Запрос заблокирован валидатором — показываем только человекочитаемое сообщение,
-            # без внутренних деталей (llm_check.reason и т.п.)
             detail = e.detail
             if isinstance(detail, dict):
                 user_msg = detail.get("message", "Пожалуйста, задавайте вопросы в рамках медицинского осмотра.")
             else:
                 user_msg = "Пожалуйста, задавайте вопросы в рамках медицинского осмотра."
-            await msg.answer(f"⚠️ {user_msg}")
+            await placeholder.edit_text(f"⚠️ {user_msg}")
         else:
             logger.warning("Backend error %s for user %s: %s", e.status, user_id, e.detail)
-            await msg.answer("Произошла ошибка. Попробуйте повторить вопрос.")
+            await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
         return
 
-    await msg.answer(result["patient_reply"], reply_markup=dialog_control_keyboard())
+    await placeholder.edit_text(result["patient_reply"], reply_markup=dialog_control_keyboard())
 
 
 @router.message(DialogState.waiting_diagnosis)
@@ -91,6 +91,8 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
         await state.clear()
         return
 
+    placeholder = await msg.answer("⏳")
+
     try:
         result = await api.submit_diagnosis(session_id, msg.text or "")
     except api.BackendError as e:
@@ -100,16 +102,16 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
                 user_msg = detail.get("message", "Некорректный ввод. Попробуйте ещё раз.")
             else:
                 user_msg = "Некорректный ввод. Попробуйте ещё раз."
-            await msg.answer(f"⚠️ {user_msg}")
+            await placeholder.edit_text(f"⚠️ {user_msg}")
         else:
             logger.warning("Backend error %s for user %s: %s", e.status, user_id, e.detail)
-            await msg.answer("Произошла ошибка при отправке диагноза. Попробуйте ещё раз.")
+            await placeholder.edit_text("Произошла ошибка при отправке диагноза. Попробуйте ещё раз.")
         return
 
     icon = "✅" if result["is_correct"] else "❌"
     score_pct = round(result["score"] * 100)
 
-    await msg.answer(
+    await placeholder.edit_text(
         f"{icon} Результат: {result['message']}\n\n"
         f"Ваш диагноз: <i>{result['user_diagnosis']}</i>\n"
         f"Верный диагноз: {result['correct_diagnosis']}\n"

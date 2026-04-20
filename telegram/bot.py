@@ -23,16 +23,6 @@ setup_logging(settings.log_level)
 
 BOT_TOKEN = settings.bot_token
 
-# Lock-файл для одного инстанса бота
-LOCK_FILE = "/tmp/bfu_bot.lock"
-
-if os.path.exists(LOCK_FILE):
-    logging.warning("Бот уже запущен. Выходим.")
-    sys.exit(0)
-
-# создаём lock-файл
-with open(LOCK_FILE, "w") as f:
-    f.write("running")
 
 async def main() -> None:
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))

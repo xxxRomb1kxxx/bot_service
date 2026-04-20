@@ -49,7 +49,9 @@ class Settings(BaseSettings):
     @field_validator("admin_ids", mode="before")
     @classmethod
     def parse_admin_ids(cls, v: object) -> List[int]:
-        """Принимает '123,456' или уже список."""
+        """Принимает '123,456', одиночный int или уже список."""
+        if isinstance(v, int):
+            return [v]
         if isinstance(v, str):
             return [int(x.strip()) for x in v.split(",") if x.strip().isdigit()]
         return v or []
