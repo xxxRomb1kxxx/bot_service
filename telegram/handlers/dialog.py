@@ -85,14 +85,19 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
         await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
         return
 
+    logger.info("Polling message %s for session %s", message_id, session_id)
+
     # Polling до готовности ответа (таймаут 60 сек)
     result = None
-    for _ in range(30):
+    for attempt in range(30):
         await asyncio.sleep(2)
         try:
             data = await api.get_message_result(session_id, message_id, tg_id)
+            logger.info("Poll attempt %d: status=%s keys=%s", attempt + 1, data.get("status"), list(data.keys()))
         except api.BackendError as e:
-            logger.warning("Poll error %s for message %s: %s", e.status, message_id, e.detail)
+            logger.warning("Poll attempt %d error: status=%s detail=%s", attempt + 1, e.status, e.detail)
+            if e.status == 404:
+                continue  # результат ещё не готов
             await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
             return
         if data.get("status") != "processing":
