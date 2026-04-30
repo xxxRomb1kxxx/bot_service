@@ -51,15 +51,11 @@ async def main() -> None:
             logger.info("Starting polling...")
             await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
         except Exception as e:
-            logger.error(f"Polling failed: {e}")
-            logger.info("Повторная попытка через 3 секунды...")
-            await asyncio.sleep(3)
+            from aiogram.exceptions import TelegramConflictError
+            delay = 15 if isinstance(e, TelegramConflictError) else 3
+            logger.error(f"Polling failed: {e}. Retry in {delay}s...")
+            await asyncio.sleep(delay)
 
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    finally:
-        # Удаляем lock при завершении
-        if os.path.exists(LOCK_FILE):
-            os.remove(LOCK_FILE)
+    asyncio.run(main())
