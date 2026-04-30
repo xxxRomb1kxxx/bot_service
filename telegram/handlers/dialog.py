@@ -60,6 +60,7 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
 
     try:
         result = await api.send_message(session_id, msg.text or "", tg_id)
+        logger.info("Message response keys: %s | body: %s", list(result.keys()), result)
     except api.BackendError as e:
         if e.status == 409:
             await state.clear()
@@ -79,7 +80,15 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
             await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
         return
 
-    await placeholder.edit_text(result["patient_reply"], reply_markup=dialog_control_keyboard())
+    reply = (
+        result.get("patient_reply")
+        or result.get("reply")
+        or result.get("response")
+        or result.get("message")
+        or result.get("text")
+        or str(result)
+    )
+    await placeholder.edit_text(reply, reply_markup=dialog_control_keyboard())
 
 
 @router.message(DialogState.waiting_diagnosis)
