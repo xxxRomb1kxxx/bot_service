@@ -88,12 +88,12 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
     logger.info("Polling message %s for session %s", message_id, session_id)
 
     # Polling до появления reply (таймаут 60 сек, интервал 0.5 сек)
-    # Бэкенд удаляет задачу атомарно с сохранением результата → нужен частый опрос
     reply = None
     for attempt in range(120):
         await asyncio.sleep(0.5)
         try:
             data = await api.get_message_result(session_id, message_id, tg_id)
+            logger.info("Poll attempt %d: status=%s reply=%r", attempt + 1, data.get("status"), data.get("reply"))
         except api.BackendError as e:
             if e.status == 404:
                 continue
@@ -104,6 +104,19 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
             logger.info("Got reply on attempt %d", attempt + 1)
             reply = data["reply"]
             break
+
+    # Fallback: задача могла исчезнуть до первого poll — ищем ответ в статусе сессии
+    if reply is None:
+        try:
+            status_data = await api.get_session_status(session_id, tg_id)
+            logger.info("Session status fallback: %s", status_data)
+            reply = (
+                status_data.get("last_reply")
+                or status_data.get("reply")
+                or status_data.get("patient_reply")
+            )
+        except api.BackendError as e:
+            logger.warning("Session status fallback error: %s %s", e.status, e.detail)
 
     if reply is None:
         await placeholder.edit_text("Пациент не ответил вовремя. Попробуйте ещё раз.")
