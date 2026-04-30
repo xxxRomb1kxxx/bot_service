@@ -92,6 +92,10 @@ async def send_message(session_id: str, text: str, tg_id: int) -> dict:
     return await _request("POST", f"/api/v1/cases/{session_id}/message", tg_id=tg_id, json={"text": text})
 
 
+async def get_message_result(session_id: str, message_id: str, tg_id: int) -> dict:
+    return await _request("GET", f"/api/v1/cases/{session_id}/messages/{message_id}", tg_id=tg_id)
+
+
 async def submit_diagnosis(session_id: str, diagnosis: str, tg_id: int) -> dict:
     return await _request("POST", f"/api/v1/cases/{session_id}/diagnosis", tg_id=tg_id, json={"diagnosis": diagnosis})
 

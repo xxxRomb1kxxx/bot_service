@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from aiogram import Router
@@ -59,8 +60,7 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
     placeholder = await msg.answer("⏳")
 
     try:
-        result = await api.send_message(session_id, msg.text or "", tg_id)
-        logger.info("Message response keys: %s | body: %s", list(result.keys()), result)
+        queued = await api.send_message(session_id, msg.text or "", tg_id)
     except api.BackendError as e:
         if e.status == 409:
             await state.clear()
@@ -78,6 +78,29 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
         else:
             logger.warning("Backend error %s for user %s: %s", e.status, user_id, e.detail)
             await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
+        return
+
+    message_id = queued.get("message_id")
+    if not message_id:
+        await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
+        return
+
+    # Polling до готовности ответа (таймаут 60 сек)
+    result = None
+    for _ in range(30):
+        await asyncio.sleep(2)
+        try:
+            data = await api.get_message_result(session_id, message_id, tg_id)
+        except api.BackendError as e:
+            logger.warning("Poll error %s for message %s: %s", e.status, message_id, e.detail)
+            await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
+            return
+        if data.get("status") != "processing":
+            result = data
+            break
+
+    if result is None:
+        await placeholder.edit_text("Пациент не ответил вовремя. Попробуйте ещё раз.")
         return
 
     reply = (
