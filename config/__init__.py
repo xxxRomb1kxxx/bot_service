@@ -30,6 +30,10 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO")
 
+    jwt_secret_key: str = Field(..., description="Секрет для подписи JWT (должен совпадать с бэкендом)")
+    jwt_algorithm: str = Field(default="HS256")
+    jwt_expire_minutes: int = Field(default=60)
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

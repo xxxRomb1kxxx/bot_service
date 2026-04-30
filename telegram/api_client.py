@@ -4,6 +4,9 @@ HTTP-клиент к FastAPI-бэкенду.
 """
 import logging
 import ssl
+from datetime import datetime, timedelta, timezone
+
+import jwt
 import aiohttp
 from aiohttp import TCPConnector
 
@@ -17,8 +20,24 @@ ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
 
+_token_cache: dict = {"token": None, "expires_at": None}
+
+
+def _get_service_token() -> str:
+    now = datetime.now(timezone.utc)
+    if _token_cache["token"] and _token_cache["expires_at"] > now + timedelta(seconds=30):
+        return _token_cache["token"]
+
+    settings = get_settings()
+    expires_at = now + timedelta(minutes=settings.jwt_expire_minutes)
+    payload = {"sub": "bot_service", "exp": expires_at}
+    token = jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+    _token_cache["token"] = token
+    _token_cache["expires_at"] = expires_at
+    return token
+
+
 def _get_connector():
-    """Создает новый connector при каждом вызове (внутри асинхронной функции)"""
     return TCPConnector(ssl=ssl_context)
 
 class BackendError(Exception):
@@ -34,8 +53,10 @@ def _user_id(tg_id: int) -> str:
 
 async def _request(method: str, path: str, **kwargs) -> dict | None:
     url = f"{BACKEND_URL}{path}"
+    headers = kwargs.pop("headers", {})
+    headers["Authorization"] = f"Bearer {_get_service_token()}"
     async with aiohttp.ClientSession() as session:
-        async with session.request(method, url, **kwargs) as resp:
+        async with session.request(method, url, headers=headers, **kwargs) as resp:
             if resp.status == 204:
                 return None
             body = await resp.json(content_type=None)
