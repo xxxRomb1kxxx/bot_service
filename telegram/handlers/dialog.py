@@ -87,36 +87,28 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
 
     logger.info("Polling message %s for session %s", message_id, session_id)
 
-    # Polling до готовности ответа (таймаут 60 сек)
-    result = None
-    for attempt in range(30):
-        await asyncio.sleep(2)
+    # Polling до появления reply (таймаут 60 сек, интервал 0.5 сек)
+    # Бэкенд удаляет задачу атомарно с сохранением результата → нужен частый опрос
+    reply = None
+    for attempt in range(120):
+        await asyncio.sleep(0.5)
         try:
             data = await api.get_message_result(session_id, message_id, tg_id)
-            logger.info("Poll attempt %d: status=%s keys=%s", attempt + 1, data.get("status"), list(data.keys()))
         except api.BackendError as e:
-            logger.warning("Poll attempt %d error: status=%s detail=%s", attempt + 1, e.status, e.detail)
             if e.status == 404:
-                continue  # результат ещё не готов
+                continue
+            logger.warning("Poll attempt %d error: status=%s detail=%s", attempt + 1, e.status, e.detail)
             await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
             return
-        if data.get("status") != "processing":
-            result = data
+        if data.get("reply") is not None:
+            logger.info("Got reply on attempt %d", attempt + 1)
+            reply = data["reply"]
             break
 
-    if result is None:
+    if reply is None:
         await placeholder.edit_text("Пациент не ответил вовремя. Попробуйте ещё раз.")
         return
-
-    reply = (
-        result.get("patient_reply")
-        or result.get("reply")
-        or result.get("response")
-        or result.get("message")
-        or result.get("text")
-        or str(result)
-    )
-    await placeholder.edit_text(reply, reply_markup=dialog_control_keyboard())
+    await placeholder.edit_text(str(reply), reply_markup=dialog_control_keyboard())
 
 
 @router.message(DialogState.waiting_diagnosis)
