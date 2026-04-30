@@ -45,7 +45,7 @@ async def control_case(cb: CallbackQuery, state: FSMContext) -> None:
         await cb.message.answer(f"⚠️ {e.detail}")
         return
 
-    await state.update_data(session_id=case["session_id"])
+    await state.update_data(session_id=case["session_id"], tg_id=tg_id)
     await state.set_state(DialogState.waiting_question)
 
     patient = case["patient"]
@@ -82,7 +82,7 @@ async def start_case(cb: CallbackQuery, state: FSMContext) -> None:
             await cb.message.answer(f"⚠️ {e.detail}")
         return
 
-    await state.update_data(session_id=case["session_id"])
+    await state.update_data(session_id=case["session_id"], tg_id=tg_id)
     await state.set_state(DialogState.waiting_question)
 
     patient = case["patient"]

@@ -18,10 +18,11 @@ async def finish_dialog(msg: Message, state: FSMContext) -> None:
     logger.info("Finish command: user_id=%s", msg.from_user.id if msg.from_user else None)
     data = await state.get_data()
     session_id = data.get("session_id")
+    tg_id = data.get("tg_id") or (msg.from_user.id if msg.from_user else None)
 
-    if session_id:
+    if session_id and tg_id:
         try:
-            await api.delete_session(session_id)
+            await api.delete_session(session_id, tg_id)
         except Exception as e:
             logger.warning("Could not delete session %s: %s", session_id, e)
 
@@ -48,7 +49,9 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
 
     data = await state.get_data()
     session_id = data.get("session_id")
-    if not session_id:
+    tg_id = data.get("tg_id") or user_id
+
+    if not session_id or not tg_id:
         await msg.answer("Произошла ошибка состояния. Начните новый кейс через /start")
         await state.clear()
         return
@@ -56,7 +59,7 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
     placeholder = await msg.answer("⏳")
 
     try:
-        result = await api.send_message(session_id, msg.text or "")
+        result = await api.send_message(session_id, msg.text or "", tg_id)
     except api.BackendError as e:
         if e.status == 409:
             await state.clear()
@@ -86,7 +89,9 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
 
     data = await state.get_data()
     session_id = data.get("session_id")
-    if not session_id:
+    tg_id = data.get("tg_id") or user_id
+
+    if not session_id or not tg_id:
         await msg.answer("Произошла ошибка состояния. Начните новый кейс через /start")
         await state.clear()
         return
@@ -94,7 +99,7 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
     placeholder = await msg.answer("⏳")
 
     try:
-        result = await api.submit_diagnosis(session_id, msg.text or "")
+        result = await api.submit_diagnosis(session_id, msg.text or "", tg_id)
     except api.BackendError as e:
         if e.status == 422:
             detail = e.detail
@@ -119,7 +124,6 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
         parse_mode="HTML",
     )
 
-    # Итоговая медкарта
     card = result.get("card", {})
     lines = []
     if card.get("complaints"):

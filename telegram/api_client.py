@@ -20,25 +20,33 @@ ssl_context = ssl.create_default_context()
 ssl_context.check_hostname = False
 ssl_context.verify_mode = ssl.CERT_NONE
 
-_token_cache: dict = {"token": None, "expires_at": None}
+_token_cache: dict[str, dict] = {}
 
 
-def _get_service_token() -> str:
+def _user_id(tg_id: int) -> str:
+    return f"tg_{tg_id}"
+
+
+def _get_token(user_id: str) -> str:
     now = datetime.now(timezone.utc)
-    if _token_cache["token"] and _token_cache["expires_at"] > now + timedelta(seconds=30):
-        return _token_cache["token"]
+    cached = _token_cache.get(user_id)
+    if cached and cached["expires_at"] > now + timedelta(seconds=30):
+        return cached["token"]
 
     settings = get_settings()
     expires_at = now + timedelta(minutes=settings.jwt_expire_minutes)
-    payload = {"sub": "bot_service", "exp": expires_at}
-    token = jwt.encode(payload, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
-    _token_cache["token"] = token
-    _token_cache["expires_at"] = expires_at
+    token = jwt.encode(
+        {"sub": user_id, "exp": expires_at},
+        settings.jwt_secret_key,
+        algorithm=settings.jwt_algorithm,
+    )
+    _token_cache[user_id] = {"token": token, "expires_at": expires_at}
     return token
 
 
 def _get_connector():
     return TCPConnector(ssl=ssl_context)
+
 
 class BackendError(Exception):
     def __init__(self, status: int, detail: str):
@@ -47,14 +55,10 @@ class BackendError(Exception):
         super().__init__(f"Backend {status}: {detail}")
 
 
-def _user_id(tg_id: int) -> str:
-    return f"tg_{tg_id}"
-
-
-async def _request(method: str, path: str, **kwargs) -> dict | None:
+async def _request(method: str, path: str, tg_id: int, **kwargs) -> dict | None:
     url = f"{BACKEND_URL}{path}"
     headers = kwargs.pop("headers", {})
-    headers["Authorization"] = f"Bearer {_get_service_token()}"
+    headers["Authorization"] = f"Bearer {_get_token(_user_id(tg_id))}"
     async with aiohttp.ClientSession() as session:
         async with session.request(method, url, headers=headers, **kwargs) as resp:
             if resp.status == 204:
@@ -73,57 +77,56 @@ async def start_case(tg_id: int, disease_type: str | None = None) -> dict:
     body = {"user_id": _user_id(tg_id)}
     if disease_type:
         body["disease_type"] = disease_type
-    return await _request("POST", "/api/v1/cases/start", json=body)
+    return await _request("POST", "/api/v1/cases/start", tg_id=tg_id, json=body)
 
 
 async def start_random_case(tg_id: int) -> dict:
-    return await _request("POST", "/api/v1/cases/start", json={"user_id": _user_id(tg_id)})
+    return await _request("POST", "/api/v1/cases/start", tg_id=tg_id, json={"user_id": _user_id(tg_id)})
 
 
 async def start_blind_case(tg_id: int) -> dict:
-    return await _request("POST", "/api/v1/cases/start-blind", json={"user_id": _user_id(tg_id)})
+    return await _request("POST", "/api/v1/cases/start-blind", tg_id=tg_id, json={"user_id": _user_id(tg_id)})
 
 
-async def send_message(session_id: str, text: str) -> dict:
-    return await _request("POST", f"/api/v1/cases/{session_id}/message", json={"text": text})
+async def send_message(session_id: str, text: str, tg_id: int) -> dict:
+    return await _request("POST", f"/api/v1/cases/{session_id}/message", tg_id=tg_id, json={"text": text})
 
 
-async def submit_diagnosis(session_id: str, diagnosis: str) -> dict:
-    return await _request("POST", f"/api/v1/cases/{session_id}/diagnosis", json={"diagnosis": diagnosis})
+async def submit_diagnosis(session_id: str, diagnosis: str, tg_id: int) -> dict:
+    return await _request("POST", f"/api/v1/cases/{session_id}/diagnosis", tg_id=tg_id, json={"diagnosis": diagnosis})
 
 
-async def get_session_status(session_id: str) -> dict:
-    return await _request("GET", f"/api/v1/cases/{session_id}/status")
+async def get_session_status(session_id: str, tg_id: int) -> dict:
+    return await _request("GET", f"/api/v1/cases/{session_id}/status", tg_id=tg_id)
 
 
-async def delete_session(session_id: str) -> None:
-    await _request("DELETE", f"/api/v1/cases/{session_id}")
+async def delete_session(session_id: str, tg_id: int) -> None:
+    await _request("DELETE", f"/api/v1/cases/{session_id}", tg_id=tg_id)
 
 
 # ── Whitelist ─────────────────────────────────────────────────────────────────
 
 async def ensure_whitelisted(tg_id: int) -> None:
-    """Добавляет пользователя в вайтлист если его нет (идемпотентно)."""
-    await _request("POST", "/api/v1/whitelist", json={"user_id": _user_id(tg_id)})
+    await _request("POST", "/api/v1/whitelist", tg_id=tg_id, json={"user_id": _user_id(tg_id)})
 
 
-async def add_to_whitelist(user_id: str) -> dict:
-    return await _request("POST", "/api/v1/whitelist", json={"user_id": user_id})
+async def add_to_whitelist(user_id: str, tg_id: int) -> dict:
+    return await _request("POST", "/api/v1/whitelist", tg_id=tg_id, json={"user_id": user_id})
 
 
-async def remove_from_whitelist(user_id: str) -> None:
-    await _request("DELETE", f"/api/v1/whitelist/{user_id}")
+async def remove_from_whitelist(user_id: str, tg_id: int) -> None:
+    await _request("DELETE", f"/api/v1/whitelist/{user_id}", tg_id=tg_id)
 
 
-async def get_whitelist() -> dict:
-    return await _request("GET", "/api/v1/whitelist")
+async def get_whitelist(tg_id: int) -> dict:
+    return await _request("GET", "/api/v1/whitelist", tg_id=tg_id)
 
 
-async def get_whitelist_user(user_id: str) -> dict:
-    return await _request("GET", f"/api/v1/whitelist/{user_id}")
+async def get_whitelist_user(user_id: str, tg_id: int) -> dict:
+    return await _request("GET", f"/api/v1/whitelist/{user_id}", tg_id=tg_id)
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
-async def health_check() -> dict:
-    return await _request("GET", "/api/v1/health")
+async def health_check(tg_id: int) -> dict:
+    return await _request("GET", "/api/v1/health", tg_id=tg_id)

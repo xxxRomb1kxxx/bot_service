@@ -26,8 +26,6 @@ class AdminState(StatesGroup):
     removing_user = State()
 
 
-# ── Фильтр — только для команд ниже ──────────────────────────────────────────
-
 @router.message(Command("admin"))
 async def cmd_admin(msg: Message) -> None:
     if not is_admin(msg.from_user.id):
@@ -49,7 +47,7 @@ async def cmd_wl_list(msg: Message) -> None:
         return
 
     try:
-        data = await api.get_whitelist()
+        data = await api.get_whitelist(msg.from_user.id)
     except api.BackendError as e:
         await msg.answer(f"⚠️ Ошибка: {e.detail}")
         return
@@ -97,7 +95,7 @@ async def cmd_wl_add_handle(msg: Message, state: FSMContext) -> None:
 
     await state.clear()
     try:
-        result = await api.add_to_whitelist(user_id)
+        result = await api.add_to_whitelist(user_id, msg.from_user.id)
         await msg.answer(
             f"✅ Пользователь <code>{result['user_id']}</code> добавлен.\n"
             f"Статус: {result['state']}",
@@ -128,7 +126,7 @@ async def cmd_wl_remove_handle(msg: Message, state: FSMContext) -> None:
 
     await state.clear()
     try:
-        await api.remove_from_whitelist(user_id)
+        await api.remove_from_whitelist(user_id, msg.from_user.id)
         await msg.answer(f"🗑️ Пользователь <code>{user_id}</code> удалён.", parse_mode="HTML")
     except api.BackendError as e:
         if e.status == 404:
@@ -149,7 +147,7 @@ async def cmd_wl_check(msg: Message) -> None:
 
     user_id = parts[1].strip()
     try:
-        entry = await api.get_whitelist_user(user_id)
+        entry = await api.get_whitelist_user(user_id, msg.from_user.id)
         icons = {"idle": "⬜", "active": "🟢", "finished": "🔵", "abandoned": "🔴"}
         icon = icons.get(entry["state"], "⚪")
         sid = entry.get("session_id") or "—"
@@ -173,7 +171,7 @@ async def cmd_health(msg: Message) -> None:
     if not is_admin(msg.from_user.id):
         return
     try:
-        data = await api.health_check()
+        data = await api.health_check(msg.from_user.id)
         icon = "✅" if data.get("status") == "ok" else "❌"
         await msg.answer(
             f"{icon} Статус бэкенда: {data.get('status')}\n"
