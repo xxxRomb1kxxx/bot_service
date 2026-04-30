@@ -13,6 +13,36 @@ router = Router(name="training")
 logger = logging.getLogger(__name__)
 
 
+async def _cleanup_stuck_session(tg_id: int) -> None:
+    """Удаляет зависшую сессию пользователя через вайтлист."""
+    entry = await api.get_whitelist_user(f"tg_{tg_id}", tg_id)
+    session_id = entry.get("session_id")
+    if session_id:
+        await api.delete_session(session_id, tg_id)
+        logger.info("Cleaned up stuck session %s for user %s", session_id, tg_id)
+
+
+async def _start_case_with_retry(tg_id: int, disease_type: str | None = None) -> dict:
+    """Запускает кейс, при 409 чистит зависшую сессию и повторяет."""
+    try:
+        return await api.start_case(tg_id, disease_type=disease_type)
+    except api.BackendError as e:
+        if e.status != 409:
+            raise
+        await _cleanup_stuck_session(tg_id)
+        return await api.start_case(tg_id, disease_type=disease_type)
+
+
+async def _start_random_case_with_retry(tg_id: int) -> dict:
+    try:
+        return await api.start_random_case(tg_id)
+    except api.BackendError as e:
+        if e.status != 409:
+            raise
+        await _cleanup_stuck_session(tg_id)
+        return await api.start_random_case(tg_id)
+
+
 @router.callback_query(F.data == "training")
 async def training(cb: CallbackQuery) -> None:
     logger.info("Training menu: user_id=%s", cb.from_user.id if cb.from_user else None)
@@ -40,23 +70,13 @@ async def control_case(cb: CallbackQuery, state: FSMContext) -> None:
 
     try:
         await api.ensure_whitelisted(tg_id)
-        case = await api.start_random_case(tg_id)
+        case = await _start_random_case_with_retry(tg_id)
     except api.BackendError as e:
         await cb.message.answer(f"⚠️ {e.detail}")
         return
 
     await state.update_data(session_id=case["session_id"], tg_id=tg_id)
     await state.set_state(DialogState.waiting_question)
-
-    patient = case["patient"]
-    # await cb.message.answer(
-    #     f"🎯 Контрольный кейс начат!\n\n"
-    #     f"👤 Пациент: {patient['fio']}\n"
-    #     f"Пол: {patient['gender']} | Возраст: {patient['age']} лет\n"
-    #     f"Профессия: {patient['profession']}\n\n"
-    #     "Болезнь скрыта — поставьте диагноз самостоятельно.",
-    #     parse_mode="HTML",
-    # )
     await cb.message.answer(case.get("greeting", "Добрый день, доктор. Можно войти на приём?"))
 
 
@@ -71,30 +91,13 @@ async def start_case(cb: CallbackQuery, state: FSMContext) -> None:
 
     try:
         await api.ensure_whitelisted(tg_id)
-        case = await api.start_case(tg_id, disease_type=disease_code)
+        case = await _start_case_with_retry(tg_id, disease_type=disease_code)
     except api.BackendError as e:
-        if e.status == 409:
-            await cb.message.answer(
-                "⚠️ У вас уже есть активная сессия.\n"
-                "Завершите её командой /finish, затем начните новую."
-            )
-        else:
-            await cb.message.answer(f"⚠️ {e.detail}")
+        await cb.message.answer(f"⚠️ {e.detail}")
         return
 
     await state.update_data(session_id=case["session_id"], tg_id=tg_id)
     await state.set_state(DialogState.waiting_question)
 
-    patient = case["patient"]
-    disease_name = case.get("disease_type") or "неизвестно"
-
     logger.info("Case started: disease=%s, user_id=%s", disease_code, user_id)
-    # await cb.message.answer(
-    #     f"✅ Кейс начат!\n\n"
-    #     f"🦠 Болезнь: {disease_name}\n\n"
-    #     f"👤 Пациент: {patient['fio']}\n"
-    #     f"Пол: {patient['gender']} | Возраст: {patient['age']} лет\n"
-    #     f"Профессия: {patient['profession']}",
-    #     parse_mode="HTML",
-    # )
     await cb.message.answer(case.get("greeting", "Добрый день, доктор. Можно войти на приём?"))
