@@ -96,18 +96,18 @@ async def _request(
 # ── Cases ──────────────────────────────────────────────────────────────────────
 
 async def start_case(tg_id: int, disease_type: str | None = None) -> dict:
-    body: dict = {}
+    body: dict = {"user_id": _user_id(tg_id)}
     if disease_type:
         body["disease_type"] = disease_type
     return await _request("POST", "/api/v1/cases/start", tg_id, json=body)
 
 
 async def start_random_case(tg_id: int) -> dict:
-    return await _request("POST", "/api/v1/cases/start", tg_id, json={})
+    return await _request("POST", "/api/v1/cases/start", tg_id, json={"user_id": _user_id(tg_id)})
 
 
 async def start_blind_case(tg_id: int) -> dict:
-    return await _request("POST", "/api/v1/cases/start-blind", tg_id)
+    return await _request("POST", "/api/v1/cases/start-blind", tg_id, json={"user_id": _user_id(tg_id)})
 
 
 async def send_message(session_id: str, text: str, tg_id: int) -> dict:
