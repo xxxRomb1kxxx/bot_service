@@ -23,10 +23,10 @@ POLL_MAX_ATTEMPTS = int(POLL_TIMEOUT_SEC / POLL_INTERVAL_SEC)
 
 @router.message(Command("finish"))
 async def finish_dialog(msg: Message, state: FSMContext) -> None:
-    logger.info("Finish command: user_id=%s", msg.from_user.id if msg.from_user else None)
     data = await state.get_data()
     session_id = data.get("session_id")
     tg_id = data.get("tg_id") or (msg.from_user.id if msg.from_user else None)
+    logger.info("Finish command: user_id=%s", tg_id)
 
     if session_id and tg_id:
         try:
@@ -41,8 +41,8 @@ async def finish_dialog(msg: Message, state: FSMContext) -> None:
 
 @router.message(Command("diagnosis"))
 async def force_diagnosis(msg: Message, state: FSMContext) -> None:
-    logger.info("Diagnosis command: user_id=%s", msg.from_user.id if msg.from_user else None)
     data = await state.get_data()
+    logger.info("Diagnosis command: user_id=%s", data.get("tg_id") or (msg.from_user.id if msg.from_user else None))
     if not data.get("session_id"):
         await msg.answer("Сначала начните кейс! Нажмите /start")
         return
