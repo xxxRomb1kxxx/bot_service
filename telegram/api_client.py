@@ -110,6 +110,10 @@ async def start_blind_case(tg_id: int) -> dict:
     return await _request("POST", "/api/v1/cases/start-blind", tg_id, json={"user_id": _user_id(tg_id)})
 
 
+async def get_message_result(session_id: str, message_id: str, tg_id: int) -> dict:
+    return await _request("GET", f"/api/v1/cases/{session_id}/messages/{message_id}", tg_id)
+
+
 async def send_message(session_id: str, text: str, tg_id: int) -> dict:
     return await _request(
         "POST", f"/api/v1/cases/{session_id}/message", tg_id, json={"text": text}
