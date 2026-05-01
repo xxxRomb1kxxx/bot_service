@@ -10,3 +10,5 @@ services:
     environment:
       BACKEND_URL: ${BACKEND_URL:-https://simulatorfordoctorsfastapi-api-production.up.railway.app}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOGIN_SHARED_SECRET: ${LOGIN_SHARED_SECRET}
+      TOKEN_LIFETIME_MINUTES: ${TOKEN_LIFETIME_MINUTES:-50}

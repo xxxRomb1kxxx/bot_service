@@ -2,10 +2,14 @@
 config/__init__.py — конфигурация Telegram-бота.
 
 Переменные окружения:
-  BOT_TOKEN      — токен Telegram-бота (обязательно)
-  BACKEND_URL    — URL FastAPI-сервиса агента (default: http://localhost:8000)
-  ADMIN_IDS      — Telegram ID администраторов через запятую (например: 123456789,987654321)
-  LOG_LEVEL      — уровень логирования (default: INFO)
+  BOT_TOKEN              — токен Telegram-бота (обязательно)
+  BACKEND_URL            — URL FastAPI-сервиса агента (default: http://localhost:8000)
+  ADMIN_IDS              — Telegram ID администраторов через запятую (например: 123456789,987654321)
+  LOG_LEVEL              — уровень логирования (default: INFO)
+  LOGIN_SHARED_SECRET    — shared secret для X-Login-Secret в POST /api/v1/auth/login;
+                           должен совпадать со значением на бэкенде; пустая строка = фича выключена
+  TOKEN_LIFETIME_MINUTES — сколько минут кэшировать access_token (default: 50;
+                           должно быть < jwt_expire_minutes бэкенда, чтобы избежать race на expiry)
 """
 import logging
 import sys
@@ -30,9 +34,17 @@ class Settings(BaseSettings):
 
     log_level: str = Field(default="INFO")
 
-    jwt_secret_key: str = Field(..., description="Секрет для подписи JWT (должен совпадать с бэкендом)")
-    jwt_algorithm: str = Field(default="HS256")
-    jwt_expire_minutes: int = Field(default=60)
+    login_shared_secret: str = Field(
+        default="",
+        description="Shared secret для X-Login-Secret в POST /api/v1/auth/login. "
+                    "Должен совпадать со значением на бэкенде. Пустая строка = фича выключена.",
+    )
+    token_lifetime_minutes: int = Field(
+        default=50,
+        description="На сколько минут локально кэшировать access_token. "
+                    "Должно быть < jwt_expire_minutes бэкенда (по умолчанию 60), "
+                    "чтобы избежать race на expiry.",
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",
