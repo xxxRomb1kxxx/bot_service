@@ -46,15 +46,19 @@ async def main() -> None:
         logger.warning(f"Не удалось удалить webhook: {e}")
 
     # Запуск polling с retry на случай TelegramConflictError
-    while True:
-        try:
-            logger.info("Starting polling...")
-            await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
-        except Exception as e:
-            from aiogram.exceptions import TelegramConflictError
-            delay = 15 if isinstance(e, TelegramConflictError) else 3
-            logger.error(f"Polling failed: {e}. Retry in {delay}s...")
-            await asyncio.sleep(delay)
+    from telegram import api_client
+    try:
+        while True:
+            try:
+                logger.info("Starting polling...")
+                await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+            except Exception as e:
+                from aiogram.exceptions import TelegramConflictError
+                delay = 15 if isinstance(e, TelegramConflictError) else 3
+                logger.error(f"Polling failed: {e}. Retry in {delay}s...")
+                await asyncio.sleep(delay)
+    finally:
+        await api_client.close_session()
 
 
 if __name__ == "__main__":

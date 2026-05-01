@@ -2,8 +2,10 @@
 HTTP-клиент к FastAPI-бэкенду.
 Аутентификация временно отключена (закомментирована).
 """
+import asyncio
 import logging
 import ssl
+from typing import Optional
 # import time  # нужен когда включим auth
 
 import aiohttp
@@ -30,6 +32,31 @@ def _user_id(tg_id: int) -> str:
 
 def _backend_url() -> str:
     return get_settings().backend_url
+
+
+# ── Shared aiohttp session ────────────────────────────────────────────────────
+# Одна сессия на весь процесс: переиспользует TCP-соединения и TLS handshake.
+
+_session: Optional[aiohttp.ClientSession] = None
+_session_lock = asyncio.Lock()
+
+
+async def _get_session() -> aiohttp.ClientSession:
+    global _session
+    if _session is None or _session.closed:
+        async with _session_lock:
+            if _session is None or _session.closed:
+                connector = aiohttp.TCPConnector(ssl=ssl_context, limit=100)
+                timeout = aiohttp.ClientTimeout(total=30, connect=5)
+                _session = aiohttp.ClientSession(connector=connector, timeout=timeout)
+    return _session
+
+
+async def close_session() -> None:
+    global _session
+    if _session and not _session.closed:
+        await _session.close()
+    _session = None
 
 
 # ── Token cache (отключено) ────────────────────────────────────────────────────
@@ -71,26 +98,25 @@ async def _request(
 ) -> dict | None:
     # token = await _get_token(tg_id)
     url = f"{_backend_url()}{path}"
+    session = await _get_session()
 
-    async with aiohttp.ClientSession() as session:
-        async with session.request(
-            method,
-            url,
-            # headers={"Authorization": f"Bearer {token}"},
-            ssl=ssl_context,
-            **kwargs,
-        ) as resp:
-            if resp.status == 204:
-                return None
-            body = await resp.json(content_type=None)
-            # if resp.status == 401 and _retry:
-            #     _token_cache.pop(tg_id, None)
-            #     return await _request(method, path, tg_id, _retry=False, **kwargs)
-            if resp.status >= 400:
-                detail = body.get("detail", str(body)) if isinstance(body, dict) else str(body)
-                logger.warning("Backend error %d %s: %s", resp.status, path, detail)
-                raise BackendError(resp.status, detail)
-            return body
+    async with session.request(
+        method,
+        url,
+        # headers={"Authorization": f"Bearer {token}"},
+        **kwargs,
+    ) as resp:
+        if resp.status == 204:
+            return None
+        body = await resp.json(content_type=None)
+        # if resp.status == 401 and _retry:
+        #     _token_cache.pop(tg_id, None)
+        #     return await _request(method, path, tg_id, _retry=False, **kwargs)
+        if resp.status >= 400:
+            detail = body.get("detail", str(body)) if isinstance(body, dict) else str(body)
+            logger.warning("Backend error %d %s: %s", resp.status, path, detail)
+            raise BackendError(resp.status, detail)
+        return body
 
 
 # ── Cases ──────────────────────────────────────────────────────────────────────
@@ -138,17 +164,15 @@ async def delete_session(session_id: str, tg_id: int) -> None:
 
 async def ensure_whitelisted(tg_id: int) -> None:
     url = f"{_backend_url()}/api/v1/whitelist"
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            url, json={"user_id": _user_id(tg_id)}, ssl=ssl_context,
-        ) as resp:
-            if resp.status in (200, 201, 204):
-                return
-            body = await resp.json(content_type=None)
-            if resp.status >= 400:
-                detail = body.get("detail", str(body)) if isinstance(body, dict) else str(body)
-                logger.warning("Backend error %d /api/v1/whitelist: %s", resp.status, detail)
-                raise BackendError(resp.status, detail)
+    session = await _get_session()
+    async with session.post(url, json={"user_id": _user_id(tg_id)}) as resp:
+        if resp.status in (200, 201, 204):
+            return
+        body = await resp.json(content_type=None)
+        if resp.status >= 400:
+            detail = body.get("detail", str(body)) if isinstance(body, dict) else str(body)
+            logger.warning("Backend error %d /api/v1/whitelist: %s", resp.status, detail)
+            raise BackendError(resp.status, detail)
 
 
 async def add_to_whitelist(user_id: str, tg_id: int) -> dict:

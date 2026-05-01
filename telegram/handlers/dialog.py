@@ -13,6 +13,13 @@ from telegram import api_client as api
 router = Router(name="dialog")
 logger = logging.getLogger(__name__)
 
+# Параметры polling ответа пациента.
+# POLL_TIMEOUT_SEC должен быть больше backend RESPONSE_TIMEOUT (обычно 60 с),
+# чтобы бот не выходил из цикла раньше, чем LLM успеет ответить.
+POLL_INTERVAL_SEC = 0.5
+POLL_TIMEOUT_SEC = 75
+POLL_MAX_ATTEMPTS = int(POLL_TIMEOUT_SEC / POLL_INTERVAL_SEC)
+
 
 @router.message(Command("finish"))
 async def finish_dialog(msg: Message, state: FSMContext) -> None:
@@ -87,13 +94,13 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
 
     logger.info("Polling message %s for session %s", message_id, session_id)
 
-    # Polling до появления reply (таймаут 60 сек, интервал 0.5 сек).
-    # Если задача уже была видна (status=processing) и вернулась 404 — бэкенд
-    # завершил обработку и удалил задачу; сразу выходим в fallback.
+    # Polling ответа пациента.
+    # Sleep перенесён в конец итерации — первый запрос уходит сразу, без задержки.
+    # Если задача была видна (status=processing) и вернулась 404 — бэкенд завершил
+    # обработку и удалил запись; выходим в fallback немедленно.
     reply = None
     task_seen = False
-    for attempt in range(120):
-        await asyncio.sleep(0.5)
+    for attempt in range(POLL_MAX_ATTEMPTS):
         try:
             data = await api.get_message_result(session_id, message_id, tg_id)
             task_seen = True
@@ -103,14 +110,25 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
                 if task_seen:
                     logger.info("Task %s cleaned up after processing, falling back to session status", message_id)
                     break
+                await asyncio.sleep(POLL_INTERVAL_SEC)
                 continue
             logger.warning("Poll attempt %d error: status=%s detail=%s", attempt + 1, e.status, e.detail)
             await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
             return
+
+        # Баг #1: бэкенд сигнализирует об ошибке обработки через status=error
+        if data.get("status") == "error":
+            err = data.get("error") or "Не удалось обработать запрос"
+            logger.warning("Async task failed: msg_id=%s err=%r", message_id, err)
+            await placeholder.edit_text(f"⚠️ {err}")
+            return
+
         if data.get("reply") is not None:
             logger.info("Got reply on attempt %d", attempt + 1)
             reply = data["reply"]
             break
+
+        await asyncio.sleep(POLL_INTERVAL_SEC)
 
     # Fallback: задача исчезла до первого poll или была очищена после обработки
     if reply is None:
@@ -128,7 +146,37 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
     if reply is None:
         await placeholder.edit_text("Пациент не ответил вовремя. Попробуйте ещё раз.")
         return
-    await placeholder.edit_text(str(reply), reply_markup=dialog_control_keyboard())
+    await _send_reply(placeholder, msg, str(reply), reply_markup=dialog_control_keyboard())
+
+
+def _split_long(text: str, max_len: int) -> list[str]:
+    """Разбивает текст на куски ≤ max_len, стараясь резать по абзацам или строкам."""
+    chunks: list[str] = []
+    while len(text) > max_len:
+        cut = text.rfind("\n\n", 0, max_len)
+        if cut < max_len // 2:
+            cut = text.rfind("\n", 0, max_len)
+        if cut < max_len // 2:
+            cut = max_len
+        chunks.append(text[:cut].rstrip())
+        text = text[cut:].lstrip()
+    if text:
+        chunks.append(text)
+    return chunks
+
+
+async def _send_reply(placeholder, msg: Message, text: str, *, reply_markup=None) -> None:
+    """Отправляет ответ пациента. Если длиннее 4000 символов — бьёт на части,
+    чтобы не словить TelegramBadRequest (лимит 4096 символов на сообщение)."""
+    MAX = 4000
+    if len(text) <= MAX:
+        await placeholder.edit_text(text, reply_markup=reply_markup)
+        return
+    await placeholder.edit_text("📝 Ответ пациента:")
+    for chunk in _split_long(text, MAX):
+        await msg.answer(chunk)
+    if reply_markup:
+        await msg.answer("Управление:", reply_markup=reply_markup)
 
 
 @router.message(DialogState.waiting_diagnosis)
