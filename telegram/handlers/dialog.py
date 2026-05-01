@@ -87,15 +87,22 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
 
     logger.info("Polling message %s for session %s", message_id, session_id)
 
-    # Polling до появления reply (таймаут 60 сек, интервал 0.5 сек)
+    # Polling до появления reply (таймаут 60 сек, интервал 0.5 сек).
+    # Если задача уже была видна (status=processing) и вернулась 404 — бэкенд
+    # завершил обработку и удалил задачу; сразу выходим в fallback.
     reply = None
+    task_seen = False
     for attempt in range(120):
         await asyncio.sleep(0.5)
         try:
             data = await api.get_message_result(session_id, message_id, tg_id)
+            task_seen = True
             logger.info("Poll attempt %d: status=%s reply=%r", attempt + 1, data.get("status"), data.get("reply"))
         except api.BackendError as e:
             if e.status == 404:
+                if task_seen:
+                    logger.info("Task %s cleaned up after processing, falling back to session status", message_id)
+                    break
                 continue
             logger.warning("Poll attempt %d error: status=%s detail=%s", attempt + 1, e.status, e.detail)
             await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
@@ -105,7 +112,7 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
             reply = data["reply"]
             break
 
-    # Fallback: задача могла исчезнуть до первого poll — ищем ответ в статусе сессии
+    # Fallback: задача исчезла до первого poll или была очищена после обработки
     if reply is None:
         try:
             status_data = await api.get_session_status(session_id, tg_id)
