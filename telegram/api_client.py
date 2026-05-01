@@ -133,19 +133,18 @@ async def delete_session(session_id: str, tg_id: int) -> None:
 # ── Whitelist ──────────────────────────────────────────────────────────────────
 
 async def ensure_whitelisted(tg_id: int) -> None:
-    pass  # аутентификация временно отключена
-    # url = f"{_backend_url()}/api/v1/whitelist"
-    # async with aiohttp.ClientSession() as session:
-    #     async with session.post(
-    #         url, json={"user_id": _user_id(tg_id)}, ssl=ssl_context,
-    #     ) as resp:
-    #         if resp.status == 204:
-    #             return
-    #         body = await resp.json(content_type=None)
-    #         if resp.status >= 400:
-    #             detail = body.get("detail", str(body)) if isinstance(body, dict) else str(body)
-    #             logger.warning("Backend error %d /api/v1/whitelist: %s", resp.status, detail)
-    #             raise BackendError(resp.status, detail)
+    url = f"{_backend_url()}/api/v1/whitelist"
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            url, json={"user_id": _user_id(tg_id)}, ssl=ssl_context,
+        ) as resp:
+            if resp.status in (200, 201, 204):
+                return
+            body = await resp.json(content_type=None)
+            if resp.status >= 400:
+                detail = body.get("detail", str(body)) if isinstance(body, dict) else str(body)
+                logger.warning("Backend error %d /api/v1/whitelist: %s", resp.status, detail)
+                raise BackendError(resp.status, detail)
 
 
 async def add_to_whitelist(user_id: str, tg_id: int) -> dict:
