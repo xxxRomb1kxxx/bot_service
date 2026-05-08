@@ -48,7 +48,11 @@ async def _get_session() -> aiohttp.ClientSession:
         async with _session_lock:
             if _session is None or _session.closed:
                 connector = aiohttp.TCPConnector(ssl=ssl_context, limit=100)
-                timeout = aiohttp.ClientTimeout(total=30, connect=5)
+                # total: верхняя граница для медленных LLM-вызовов (finish-consultation,
+                # diagnosis). Раньше было 30 с — на холодном пути GigaChat успевал
+                # ответить 30+ с и бот выдавал "Произошла ошибка" при успешном
+                # бэкенде. sock_read держит соединение, пока сервер шлёт данные.
+                timeout = aiohttp.ClientTimeout(total=120, connect=5, sock_read=90)
                 _session = aiohttp.ClientSession(connector=connector, timeout=timeout)
     return _session
 
@@ -133,8 +137,11 @@ async def _request(
                 raise BackendError(resp.status, detail)
             return body
     except asyncio.TimeoutError:
-        logger.warning("Backend timeout %s (>30s)", path)
+        logger.warning("Backend timeout %s", path)
         raise BackendError(504, "Сервер не успел ответить.")
+    except aiohttp.ClientError as e:
+        logger.warning("Backend network error %s: %s", path, e)
+        raise BackendError(503, "Сетевая ошибка соединения с сервером.")
 
 
 # ── Cases ──────────────────────────────────────────────────────────────────────

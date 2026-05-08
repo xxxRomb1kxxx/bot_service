@@ -206,6 +206,12 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
             else:
                 user_msg = "Пожалуйста, задавайте вопросы в рамках медицинского осмотра."
             await placeholder.edit_text(f"⚠️ {user_msg}")
+        elif e.status in (502, 503, 504):
+            logger.warning("Transient backend error %s for user %s: %s", e.status, user_id, e.detail)
+            await placeholder.edit_text(
+                "⏳ Сервер сейчас перегружен и не успел ответить. "
+                "Подождите минуту и повторите вопрос."
+            )
         else:
             logger.warning("Backend error %s for user %s: %s", e.status, user_id, e.detail)
             await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
@@ -234,6 +240,14 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
                 if task_seen:
                     logger.info("Task %s cleaned up after processing, falling back to session status", message_id)
                     break
+                await asyncio.sleep(POLL_INTERVAL_SEC)
+                continue
+            # Транзиентные ошибки (таймаут опроса, временная недоступность бэкенда,
+            # сетевой сбой) не должны убивать polling: задача в фоне, скорее всего,
+            # ещё обрабатывается. Логируем и продолжаем — общее окно POLL_TIMEOUT_SEC
+            # даёт ей шанс завершиться.
+            if e.status in (502, 503, 504):
+                logger.info("Poll attempt %d transient error %s, retrying", attempt + 1, e.status)
                 await asyncio.sleep(POLL_INTERVAL_SEC)
                 continue
             logger.warning("Poll attempt %d error: status=%s detail=%s", attempt + 1, e.status, e.detail)
@@ -328,6 +342,12 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
             else:
                 user_msg = "Некорректный ввод. Попробуйте ещё раз."
             await placeholder.edit_text(f"⚠️ {user_msg}")
+        elif e.status in (502, 503, 504):
+            logger.warning("Transient backend error %s for user %s: %s", e.status, user_id, e.detail)
+            await placeholder.edit_text(
+                "⏳ Сервер сейчас перегружен и не успел обработать диагноз. "
+                "Подождите минуту и отправьте ещё раз."
+            )
         else:
             logger.warning("Backend error %s for user %s: %s", e.status, user_id, e.detail)
             await placeholder.edit_text("Произошла ошибка при отправке диагноза. Попробуйте ещё раз.")
@@ -373,3 +393,4 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
         "Диалог завершён. Для нового кейса нажмите /start",
         reply_markup=ReplyKeyboardRemove(),
     )
+
