@@ -89,6 +89,13 @@ async def force_finish_consultation(msg: Message, state: FSMContext) -> None:
             )
             await state.clear()
             return
+        if e.status in (502, 504):
+            await placeholder.edit_text(
+                "⏳ Сервер не успел подготовить отчёт за отведённое время. "
+                "Подождите минуту и нажмите «Завершить консультацию» ещё раз — "
+                "оценка может уже быть готова."
+            )
+            return
         logger.warning("finish-consultation backend error: %s %s", e.status, e.detail)
         await placeholder.edit_text("Произошла ошибка. Попробуйте ещё раз.")
         return

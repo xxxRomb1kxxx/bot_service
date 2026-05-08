@@ -3,6 +3,7 @@ HTTP-клиент к FastAPI-бэкенду.
 Аутентификация временно отключена (закомментирована).
 """
 import asyncio
+import json
 import logging
 import ssl
 from typing import Optional
@@ -100,23 +101,40 @@ async def _request(
     url = f"{_backend_url()}{path}"
     session = await _get_session()
 
-    async with session.request(
-        method,
-        url,
-        # headers={"Authorization": f"Bearer {token}"},
-        **kwargs,
-    ) as resp:
-        if resp.status == 204:
-            return None
-        body = await resp.json(content_type=None)
-        # if resp.status == 401 and _retry:
-        #     _token_cache.pop(tg_id, None)
-        #     return await _request(method, path, tg_id, _retry=False, **kwargs)
-        if resp.status >= 400:
-            detail = body.get("detail", str(body)) if isinstance(body, dict) else str(body)
-            logger.warning("Backend error %d %s: %s", resp.status, path, detail)
-            raise BackendError(resp.status, detail)
-        return body
+    try:
+        async with session.request(
+            method,
+            url,
+            # headers={"Authorization": f"Bearer {token}"},
+            **kwargs,
+        ) as resp:
+            if resp.status == 204:
+                return None
+
+            text = await resp.text()
+            try:
+                body = json.loads(text) if text else {}
+            except json.JSONDecodeError:
+                logger.warning(
+                    "Backend returned non-JSON %s: status=%s body=%r",
+                    path, resp.status, text[:200],
+                )
+                raise BackendError(
+                    resp.status or 502,
+                    "Сервер вернул пустой/некорректный ответ.",
+                )
+
+            # if resp.status == 401 and _retry:
+            #     _token_cache.pop(tg_id, None)
+            #     return await _request(method, path, tg_id, _retry=False, **kwargs)
+            if resp.status >= 400:
+                detail = body.get("detail", str(body)) if isinstance(body, dict) else str(body)
+                logger.warning("Backend error %d %s: %s", resp.status, path, detail)
+                raise BackendError(resp.status, detail)
+            return body
+    except asyncio.TimeoutError:
+        logger.warning("Backend timeout %s (>30s)", path)
+        raise BackendError(504, "Сервер не успел ответить.")
 
 
 # ── Cases ──────────────────────────────────────────────────────────────────────
