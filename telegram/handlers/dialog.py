@@ -217,8 +217,22 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
             await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
         return
 
+    # Бэкенд может ответить либо синхронно (готовый patient_reply / reply прямо в
+    # POST /message — сейчас именно так), либо асинхронно (message_id для polling).
+    # Поддерживаем оба варианта.
+    sync_reply = (
+        queued.get("patient_reply")
+        or queued.get("reply")
+        or queued.get("last_reply")
+    )
+    if sync_reply is not None:
+        logger.info("Got synchronous reply for session %s", session_id)
+        await _send_reply(placeholder, msg, str(sync_reply))
+        return
+
     message_id = queued.get("message_id")
     if not message_id:
+        logger.warning("send_message returned neither reply nor message_id: %r", queued)
         await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
         return
 
@@ -395,4 +409,5 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
         "Диалог завершён. Для нового кейса нажмите /start",
         reply_markup=ReplyKeyboardRemove(),
     )
+
 
