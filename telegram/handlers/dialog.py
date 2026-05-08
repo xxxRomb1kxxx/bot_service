@@ -303,16 +303,18 @@ def _split_long(text: str, max_len: int) -> list[str]:
     return chunks
 
 
+_MAX_MESSAGE_LEN = 4000
+
+
 async def _send_reply(placeholder, msg: Message, text: str) -> None:
     """Отправляет ответ пациента. Если длиннее 4000 символов — бьёт на части,
     чтобы не словить TelegramBadRequest (лимит 4096 символов на сообщение).
     Reply-клавиатура управления уже закреплена внизу — её здесь не трогаем."""
-    MAX = 4000
-    if len(text) <= MAX:
+    if len(text) <= _MAX_MESSAGE_LEN:
         await placeholder.edit_text(text)
         return
     await placeholder.edit_text("📝 Ответ пациента:")
-    for chunk in _split_long(text, MAX):
+    for chunk in _split_long(text, _MAX_MESSAGE_LEN):
         await msg.answer(chunk)
 
 
