@@ -1,13 +1,17 @@
 import asyncio
 import logging
 
-from aiogram import Router
+from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import Message, ReplyKeyboardRemove
 
 from dialog_engine.dialog_states import DialogState
-from telegram.keyboards.inline import dialog_control_keyboard
+from telegram.keyboards.inline import (
+    BTN_DIAGNOSIS,
+    BTN_FINISH_CONSULTATION,
+    BTN_FINISH_DIALOG,
+)
 from telegram import api_client as api
 
 router = Router(name="dialog")
@@ -19,6 +23,13 @@ logger = logging.getLogger(__name__)
 POLL_INTERVAL_SEC = 0.5
 POLL_TIMEOUT_SEC = 75
 POLL_MAX_ATTEMPTS = int(POLL_TIMEOUT_SEC / POLL_INTERVAL_SEC)
+
+# Категории атрибутов для группировки в отчёте «Завершить консультацию»
+_CATEGORY_TITLES = {
+    "complaints": "📋 Жалобы",
+    "anamnesis": "📖 Анамнез",
+    "diagnostics": "🔬 Обследования",
+}
 
 
 @router.message(Command("finish"))
@@ -35,7 +46,7 @@ async def finish_dialog(msg: Message, state: FSMContext) -> None:
             logger.warning("Could not delete session %s: %s", session_id, e)
 
     await state.clear()
-    await msg.answer("✅ Диалог завершён.")
+    await msg.answer("✅ Диалог завершён.", reply_markup=ReplyKeyboardRemove())
     await msg.answer("Для нового кейса нажмите /start")
 
 
@@ -46,8 +57,114 @@ async def force_diagnosis(msg: Message, state: FSMContext) -> None:
     if not data.get("session_id"):
         await msg.answer("Сначала начните кейс! Нажмите /start")
         return
+    if data.get("mode") == "training":
+        await msg.answer(
+            "В тренировке постановка диагноза не используется — нажмите «✅ Завершить консультацию»."
+        )
+        return
     await state.set_state(DialogState.waiting_diagnosis)
     await msg.answer("📝 Поставьте диагноз — напишите его текстом:")
+
+
+async def force_finish_consultation(msg: Message, state: FSMContext) -> None:
+    """Тренировочный режим: завершить консультацию и получить отчёт."""
+    data = await state.get_data()
+    session_id = data.get("session_id")
+    tg_id = data.get("tg_id") or (msg.from_user.id if msg.from_user else None)
+    logger.info("Finish consultation: user_id=%s", tg_id)
+
+    if not session_id or not tg_id:
+        await msg.answer("Сначала начните кейс! Нажмите /start", reply_markup=ReplyKeyboardRemove())
+        await state.clear()
+        return
+
+    placeholder = await msg.answer("⏳ Анализирую консультацию…")
+
+    try:
+        result = await api.finish_consultation(session_id, tg_id)
+    except api.BackendError as e:
+        if e.status in (404, 409):
+            await placeholder.edit_text(
+                "Сессия уже завершена. Начните новый кейс через /start"
+            )
+            await state.clear()
+            return
+        logger.warning("finish-consultation backend error: %s %s", e.status, e.detail)
+        await placeholder.edit_text("Произошла ошибка. Попробуйте ещё раз.")
+        return
+
+    text = _format_consultation_report(result)
+    await placeholder.edit_text(text, parse_mode="HTML")
+    await msg.answer(
+        "Тренировка завершена. Для нового кейса нажмите /start",
+        reply_markup=ReplyKeyboardRemove(),
+    )
+    await state.clear()
+
+
+def _format_consultation_report(result: dict) -> str:
+    disease_name = result.get("disease_name", "?")
+    coverage_pct = round(float(result.get("coverage", 0.0)) * 100)
+    total_pct = round(float(result.get("total_score", 0.0)) * 100)
+    lq = result.get("language_quality") or {}
+    grade = int(lq.get("grade", 0) or 0)
+    lq_comment = (lq.get("comment") or "").strip()
+    lq_errors = lq.get("errors") or []
+    attributes = result.get("attributes") or []
+
+    grouped: dict[str, list[tuple[bool, str]]] = {"complaints": [], "anamnesis": [], "diagnostics": []}
+    for a in attributes:
+        cat = a.get("category", "")
+        grouped.setdefault(cat, []).append((bool(a.get("collected")), str(a.get("label", ""))))
+
+    lines: list[str] = []
+    lines.append(f"📊 Отчёт по тренировке: <b>{disease_name}</b>")
+    lines.append("")
+    lines.append("<b>Атрибуты:</b>")
+    for cat, items in grouped.items():
+        if not items:
+            continue
+        lines.append(_CATEGORY_TITLES.get(cat, cat))
+        for collected, label in items:
+            icon = "✅" if collected else "❌"
+            lines.append(f"  {icon} {label}")
+
+    collected_count = sum(1 for a in attributes if a.get("collected"))
+    total_count = len(attributes)
+    lines.append("")
+    lines.append(f"📈 Покрытие: {collected_count}/{total_count} ({coverage_pct}%)")
+
+    lines.append("")
+    grade_label = f"{grade}/5" if grade > 0 else "не оценено"
+    lines.append(f"📝 Качество русского языка: {grade_label}")
+    if lq_comment:
+        lines.append(f"<i>{lq_comment}</i>")
+    if lq_errors:
+        lines.append("Замечания:")
+        for err in lq_errors:
+            lines.append(f"  • {err}")
+
+    lines.append("")
+    lines.append(f"🏆 Итоговый балл: <b>{total_pct}%</b>")
+    return "\n".join(lines)
+
+
+# ── Кнопки управления (reply keyboard) ────────────────────────────────────────
+# Должны быть зарегистрированы ДО handle_dialog, иначе текст кнопки уйдёт пациенту.
+
+@router.message(F.text == BTN_FINISH_DIALOG)
+async def on_btn_finish_dialog(msg: Message, state: FSMContext) -> None:
+    await finish_dialog(msg, state)
+
+
+@router.message(F.text == BTN_DIAGNOSIS)
+async def on_btn_diagnosis(msg: Message, state: FSMContext) -> None:
+    await force_diagnosis(msg, state)
+
+
+@router.message(F.text == BTN_FINISH_CONSULTATION)
+async def on_btn_finish_consultation(msg: Message, state: FSMContext) -> None:
+    await force_finish_consultation(msg, state)
 
 
 @router.message(DialogState.waiting_question)
@@ -146,7 +263,7 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
     if reply is None:
         await placeholder.edit_text("Пациент не ответил вовремя. Попробуйте ещё раз.")
         return
-    await _send_reply(placeholder, msg, str(reply), reply_markup=dialog_control_keyboard())
+    await _send_reply(placeholder, msg, str(reply))
 
 
 def _split_long(text: str, max_len: int) -> list[str]:
@@ -165,18 +282,17 @@ def _split_long(text: str, max_len: int) -> list[str]:
     return chunks
 
 
-async def _send_reply(placeholder, msg: Message, text: str, *, reply_markup=None) -> None:
+async def _send_reply(placeholder, msg: Message, text: str) -> None:
     """Отправляет ответ пациента. Если длиннее 4000 символов — бьёт на части,
-    чтобы не словить TelegramBadRequest (лимит 4096 символов на сообщение)."""
+    чтобы не словить TelegramBadRequest (лимит 4096 символов на сообщение).
+    Reply-клавиатура управления уже закреплена внизу — её здесь не трогаем."""
     MAX = 4000
     if len(text) <= MAX:
-        await placeholder.edit_text(text, reply_markup=reply_markup)
+        await placeholder.edit_text(text)
         return
     await placeholder.edit_text("📝 Ответ пациента:")
     for chunk in _split_long(text, MAX):
         await msg.answer(chunk)
-    if reply_markup:
-        await msg.answer("Управление:", reply_markup=reply_markup)
 
 
 @router.message(DialogState.waiting_diagnosis)
@@ -232,5 +348,21 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
     if lines:
         await msg.answer("\n\n".join(lines), parse_mode="HTML")
 
+    lq = result.get("language_quality") or {}
+    grade = int(lq.get("grade", 0) or 0)
+    if grade > 0 or lq.get("comment") or lq.get("errors"):
+        lq_lines = [f"📝 Качество русского языка: {grade}/5" if grade > 0 else "📝 Качество русского языка: не оценено"]
+        comment = (lq.get("comment") or "").strip()
+        if comment:
+            lq_lines.append(f"<i>{comment}</i>")
+        errors = lq.get("errors") or []
+        if errors:
+            lq_lines.append("Замечания:")
+            lq_lines.extend(f"  • {e}" for e in errors)
+        await msg.answer("\n".join(lq_lines), parse_mode="HTML")
+
     await state.clear()
-    await msg.answer("Диалог завершён. Для нового кейса нажмите /start")
+    await msg.answer(
+        "Диалог завершён. Для нового кейса нажмите /start",
+        reply_markup=ReplyKeyboardRemove(),
+    )

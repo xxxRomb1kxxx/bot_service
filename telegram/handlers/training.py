@@ -5,8 +5,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
 from dialog_engine.dialog_states import DialogState
-from telegram.handlers.dialog import finish_dialog, force_diagnosis
-from telegram.keyboards.inline import training_menu
+from telegram.keyboards.inline import dialog_reply_kb, training_menu
 from telegram import api_client as api
 
 router = Router(name="training")
@@ -22,25 +21,25 @@ async def _cleanup_stuck_session(tg_id: int) -> None:
         logger.info("Cleaned up stuck session %s for user %s", session_id, tg_id)
 
 
-async def _start_case_with_retry(tg_id: int, disease_type: str | None = None) -> dict:
+async def _start_case_with_retry(tg_id: int, disease_type: str | None = None, mode: str = "control") -> dict:
     """Запускает кейс, при 409 чистит зависшую сессию и повторяет."""
     try:
-        return await api.start_case(tg_id, disease_type=disease_type)
+        return await api.start_case(tg_id, disease_type=disease_type, mode=mode)
     except api.BackendError as e:
         if e.status != 409:
             raise
         await _cleanup_stuck_session(tg_id)
-        return await api.start_case(tg_id, disease_type=disease_type)
+        return await api.start_case(tg_id, disease_type=disease_type, mode=mode)
 
 
-async def _start_random_case_with_retry(tg_id: int) -> dict:
+async def _start_random_case_with_retry(tg_id: int, mode: str = "control") -> dict:
     try:
-        return await api.start_random_case(tg_id)
+        return await api.start_random_case(tg_id, mode=mode)
     except api.BackendError as e:
         if e.status != 409:
             raise
         await _cleanup_stuck_session(tg_id)
-        return await api.start_random_case(tg_id)
+        return await api.start_random_case(tg_id, mode=mode)
 
 
 @router.callback_query(F.data == "training")
@@ -53,15 +52,6 @@ async def training(cb: CallbackQuery) -> None:
     )
 
 
-@router.callback_query(F.data.in_({"cmd:diagnosis", "cmd:finish"}))
-async def dialog_commands(cb: CallbackQuery, state: FSMContext) -> None:
-    await cb.answer()
-    if cb.data == "cmd:diagnosis":
-        await force_diagnosis(cb.message, state)
-    elif cb.data == "cmd:finish":
-        await finish_dialog(cb.message, state)
-
-
 @router.callback_query(F.data == "control_case")
 async def control_case(cb: CallbackQuery, state: FSMContext) -> None:
     logger.info("Control case: user_id=%s", cb.from_user.id if cb.from_user else None)
@@ -70,14 +60,17 @@ async def control_case(cb: CallbackQuery, state: FSMContext) -> None:
 
     try:
         await api.ensure_whitelisted(tg_id)
-        case = await _start_random_case_with_retry(tg_id)
+        case = await _start_random_case_with_retry(tg_id, mode="control")
     except api.BackendError as e:
         await cb.message.answer(f"⚠️ {e.detail}")
         return
 
-    await state.update_data(session_id=case["session_id"], tg_id=tg_id)
+    await state.update_data(session_id=case["session_id"], tg_id=tg_id, mode="control")
     await state.set_state(DialogState.waiting_question)
-    await cb.message.answer(case.get("greeting", "Добрый день, доктор. Можно войти на приём?"))
+    await cb.message.answer(
+        case.get("greeting", "Добрый день, доктор. Можно войти на приём?"),
+        reply_markup=dialog_reply_kb("control"),
+    )
 
 
 @router.callback_query(F.data.startswith("disease:"))
@@ -91,13 +84,16 @@ async def start_case(cb: CallbackQuery, state: FSMContext) -> None:
 
     try:
         await api.ensure_whitelisted(tg_id)
-        case = await _start_case_with_retry(tg_id, disease_type=disease_code)
+        case = await _start_case_with_retry(tg_id, disease_type=disease_code, mode="training")
     except api.BackendError as e:
         await cb.message.answer(f"⚠️ {e.detail}")
         return
 
-    await state.update_data(session_id=case["session_id"], tg_id=tg_id)
+    await state.update_data(session_id=case["session_id"], tg_id=tg_id, mode="training")
     await state.set_state(DialogState.waiting_question)
 
-    logger.info("Case started: disease=%s, user_id=%s", disease_code, user_id)
-    await cb.message.answer(case.get("greeting", "Добрый день, доктор. Можно войти на приём?"))
+    logger.info("Case started: disease=%s, user_id=%s, mode=training", disease_code, user_id)
+    await cb.message.answer(
+        case.get("greeting", "Добрый день, доктор. Можно войти на приём?"),
+        reply_markup=dialog_reply_kb("training"),
+    )

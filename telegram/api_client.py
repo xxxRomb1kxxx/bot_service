@@ -121,15 +121,18 @@ async def _request(
 
 # ── Cases ──────────────────────────────────────────────────────────────────────
 
-async def start_case(tg_id: int, disease_type: str | None = None) -> dict:
-    body: dict = {"user_id": _user_id(tg_id)}
+async def start_case(tg_id: int, disease_type: str | None = None, mode: str = "control") -> dict:
+    body: dict = {"user_id": _user_id(tg_id), "mode": mode}
     if disease_type:
         body["disease_type"] = disease_type
     return await _request("POST", "/api/v1/cases/start", tg_id, json=body)
 
 
-async def start_random_case(tg_id: int) -> dict:
-    return await _request("POST", "/api/v1/cases/start", tg_id, json={"user_id": _user_id(tg_id)})
+async def start_random_case(tg_id: int, mode: str = "control") -> dict:
+    return await _request(
+        "POST", "/api/v1/cases/start", tg_id,
+        json={"user_id": _user_id(tg_id), "mode": mode},
+    )
 
 
 async def start_blind_case(tg_id: int) -> dict:
@@ -149,6 +152,12 @@ async def send_message(session_id: str, text: str, tg_id: int) -> dict:
 async def submit_diagnosis(session_id: str, diagnosis: str, tg_id: int) -> dict:
     return await _request(
         "POST", f"/api/v1/cases/{session_id}/diagnosis", tg_id, json={"diagnosis": diagnosis}
+    )
+
+
+async def finish_consultation(session_id: str, tg_id: int) -> dict:
+    return await _request(
+        "POST", f"/api/v1/cases/{session_id}/finish-consultation", tg_id,
     )
 
 
