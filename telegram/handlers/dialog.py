@@ -263,8 +263,8 @@ async def cb_finish_consultation(cb: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(report=result, session_id=None)
     await card.render(
         cb.bot, cb.message.chat.id, state,
-        views.report_summary_card(result),
-        kb=report_kb("summary"),
+        views.report_attributes_card(result),
+        kb=report_kb("attributes"),
     )
 
 
@@ -319,16 +319,12 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
         await state.set_state(None)
         return
 
-    # Показываем «проверяю…» в текущей карточке диагностики.
-    await card.render(
-        msg.bot, msg.chat.id, state,
-        views.diagnosis_prompt_card(
-            patient=data.get("patient") or {},
-            q_count=int(data.get("q_count", 0) or 0),
-            hint="Проверяю диагноз…",
-        ),
-        kb=dialog_busy_kb(),
-    )
+    # Показываем «отправляю диагноз…» в текущей карточке диагностики.
+    prompt_text = views.diagnosis_prompt_card(
+        patient=data.get("patient") or {},
+        q_count=int(data.get("q_count", 0) or 0),
+    ) + "\n\n⏳ <i>Проверяю диагноз…</i>"
+    await card.render(msg.bot, msg.chat.id, state, prompt_text, kb=dialog_busy_kb())
 
     try:
         result = await api.submit_diagnosis(session_id, text, tg_id)
@@ -342,8 +338,7 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
                 views.diagnosis_prompt_card(
                     patient=data.get("patient") or {},
                     q_count=int(data.get("q_count", 0) or 0),
-                    hint=user_msg,
-                ),
+                ) + f"\n\n⚠️ <i>{user_msg}</i>",
                 kb=diagnosis_input_kb(),
             )
             return
@@ -353,8 +348,7 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
                 views.diagnosis_prompt_card(
                     patient=data.get("patient") or {},
                     q_count=int(data.get("q_count", 0) or 0),
-                    hint="Сервер перегружен. Подождите минуту и отправьте ещё раз.",
-                ),
+                ) + "\n\n⏳ <i>Сервер перегружен. Подождите минуту и отправьте ещё раз.</i>",
                 kb=diagnosis_input_kb(),
             )
             return
@@ -385,13 +379,12 @@ async def cb_report_tab(cb: CallbackQuery, state: FSMContext) -> None:
     data = await state.get_data()
     result = data.get("report") or {}
     tab = cb.data.split(":", 2)[2]
-    if tab == "attributes":
-        text = views.report_attributes_card(result)
-    elif tab == "language":
+    if tab == "language":
         text = views.report_language_card(result)
-    else:
-        tab = "summary"
+    elif tab == "summary":
         text = views.report_summary_card(result)
+    else:
+        text = views.report_attributes_card(result)
     await card.render(cb.bot, cb.message.chat.id, state, text, kb=report_kb(tab))
 
 
