@@ -27,20 +27,12 @@ async def cmd_start(msg: Message, state: FSMContext) -> None:
     # /start всегда возвращает в главное меню. Удаляем команду из чата, чтобы не мусорить.
     await card.safe_delete(msg.bot, msg.chat.id, msg.message_id)
     logger.info("Start: user_id=%s", msg.from_user.id if msg.from_user else None)
-    # Принудительно убиваем старую карточку: после «Очистить историю» в Telegram
-    # она остаётся на сервере и edit_message_text проходит «успешно», но
-    # пользователь правки не видит — и думает, что бот не запустился. Делаем
-    # чистый send для свежей карточки.
-    await card.delete(msg.bot, msg.chat.id, state)
     await show_main_menu(msg.bot, msg.chat.id, state)
 
 
 @router.message(Command("help"))
 async def cmd_help(msg: Message, state: FSMContext) -> None:
     await card.safe_delete(msg.bot, msg.chat.id, msg.message_id)
-    # Тот же кейс: если карточка была после Clear History, edit может пройти
-    # незаметно для пользователя. Пересоздаём свежую.
-    await card.delete(msg.bot, msg.chat.id, state)
     await card.render(msg.bot, msg.chat.id, state, views.HELP, kb=help_kb())
 
 
