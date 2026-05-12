@@ -1,73 +1,137 @@
+"""
+Все клавиатуры — inline (привязаны к карточке).
+Reply-клавиатуры намеренно не используются: они оставляют залипшие кнопки
+внизу и мешают единой карточной модели UI.
+"""
 from aiogram.types import (
     BotCommand,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    ReplyKeyboardMarkup,
 )
-from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 
-# Тексты кнопок управления диалогом — единый источник правды для клавиатуры и хендлеров.
-BTN_DIAGNOSIS = "🩺 Поставить диагноз"
-BTN_FINISH_DIALOG = "❌ Завершить диалог"
-BTN_FINISH_CONSULTATION = "✅ Завершить консультацию"
+# ── Болезни тренажёра (icon, label, code) ─────────────────────────────────────
+DISEASES: list[tuple[str, str, str]] = [
+    ("🩸", "Сахарный диабет", "diabetes"),
+    ("💉", "Анемия", "anemia"),
+    ("🫁", "Туберкулёз", "tuberculosis"),
+    ("🔪", "Аппендицит", "appendicitis"),
+    ("⚡", "Эпилепсия", "epilepsy"),
+]
 
 
-def main_menu() -> InlineKeyboardMarkup:
-    """Выбор режима: Тренировка или Контрольный кейс."""
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="📚 Тренировка", callback_data="training")],
-            [InlineKeyboardButton(text="🎯 Контрольный кейс", callback_data="control_case")],
-        ]
-    )
+# ── Главное меню ──────────────────────────────────────────────────────────────
+
+def main_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🏥 Тренажёр", callback_data="menu:trainer")],
+        [InlineKeyboardButton(text="📖 Помощь", callback_data="menu:help")],
+    ])
 
 
-def training_menu() -> InlineKeyboardMarkup:
-    """Выбор конкретной болезни для тренировки."""
-    diseases = [
-        ("🩸 Сахарный диабет", "diabetes"),
-        ("💉 Анемия", "anemia"),
-        ("🫁 Туберкулёз", "tuberculosis"),
-        ("🔪 Аппендицит", "appendicitis"),
-        ("⚡ Эпилепсия", "epilepsy"),
+def help_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ В главное меню", callback_data="nav:main")],
+    ])
+
+
+# ── Выбор режима / болезни ────────────────────────────────────────────────────
+
+def mode_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📚 Тренировка", callback_data="mode:training")],
+        [InlineKeyboardButton(text="🎯 Контрольный кейс", callback_data="mode:control")],
+        [InlineKeyboardButton(text="◀️ Назад", callback_data="nav:main")],
+    ])
+
+
+def disease_kb() -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton(text=f"{icon} {label}", callback_data=f"disease:{code}")]
+        for icon, label, code in DISEASES
     ]
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=name, callback_data=f"disease:{code}")]
-            for name, code in diseases
-        ]
-    )
+    rows.append([InlineKeyboardButton(text="◀️ Назад", callback_data="nav:mode")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def dialog_reply_kb(mode: str) -> ReplyKeyboardMarkup:
-    """Клавиатура управления диалогом, остаётся внизу до конца сессии.
-    В тренировочном режиме — одна кнопка завершения консультации.
-    В контрольном — постановка диагноза и выход.
-    """
-    builder = ReplyKeyboardBuilder()
+# ── Диалог ────────────────────────────────────────────────────────────────────
+
+def dialog_kb(mode: str) -> InlineKeyboardMarkup:
+    """Кнопки управления во время диалога с пациентом."""
     if mode == "training":
-        builder.button(text=BTN_FINISH_CONSULTATION)
-    else:
-        builder.button(text=BTN_DIAGNOSIS)
-        builder.button(text=BTN_FINISH_DIALOG)
-    builder.adjust(1)
-    return builder.as_markup(resize_keyboard=True, one_time_keyboard=False)
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="✅ Завершить и получить отчёт",
+                callback_data="dlg:finish",
+            )],
+            [InlineKeyboardButton(text="❌ Прервать кейс", callback_data="dlg:abort")],
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🩺 Поставить диагноз", callback_data="dlg:diagnosis")],
+        [InlineKeyboardButton(text="❌ Прервать кейс", callback_data="dlg:abort")],
+    ])
 
 
-def get_main_kb() -> ReplyKeyboardMarkup:
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="🏥 Тренажер")
-    builder.button(text="ℹ️ Помощь")
-    builder.adjust(1)
-    return builder.as_markup(resize_keyboard=True, one_time_keyboard=False)
+def diagnosis_input_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ Вернуться к диалогу", callback_data="dlg:cancel_diagnosis")],
+        [InlineKeyboardButton(text="❌ Прервать кейс", callback_data="dlg:abort")],
+    ])
 
+
+def dialog_busy_kb() -> InlineKeyboardMarkup:
+    """Клавиатура во время обработки — оставляем только «прервать», чтобы пользователь
+    не дёргал «завершить» в момент LLM-вызова."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Прервать кейс", callback_data="dlg:abort")],
+    ])
+
+
+# ── Отчёт по тренировке ───────────────────────────────────────────────────────
+
+def report_kb(tab: str) -> InlineKeyboardMarkup:
+    """Вкладки отчёта: атрибуты / язык / итог + «готово»."""
+    def mark(active: str, label: str) -> str:
+        return f"• {label}" if tab == active else label
+
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text=mark("attributes", "Атрибуты"),
+                callback_data="report:tab:attributes",
+            ),
+            InlineKeyboardButton(
+                text=mark("language", "Язык"),
+                callback_data="report:tab:language",
+            ),
+            InlineKeyboardButton(
+                text=mark("summary", "Итог"),
+                callback_data="report:tab:summary",
+            ),
+        ],
+        [InlineKeyboardButton(text="✅ Готово", callback_data="report:done")],
+    ])
+
+
+def diagnosis_result_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="✅ Готово", callback_data="report:done")],
+    ])
+
+
+# ── Ошибки / транзиент ────────────────────────────────────────────────────────
+
+def back_to_menu_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="◀️ В главное меню", callback_data="nav:main")],
+    ])
+
+
+# ── Команды бота ──────────────────────────────────────────────────────────────
 
 async def set_bot_commands(bot) -> None:
     commands = [
         BotCommand(command="start", description="🏥 Главное меню"),
-        BotCommand(command="help", description="📖 Помощь и инструкции"),
-        BotCommand(command="finish", description="⏹️ Завершить диалог"),
-        BotCommand(command="diagnosis", description="🩺 Поставить диагноз"),
+        BotCommand(command="help", description="📖 Помощь"),
     ]
     await bot.set_my_commands(commands)

@@ -1,60 +1,60 @@
+"""
+Главное меню и помощь — всё в одной карточке.
+"""
 import logging
 
 from aiogram import F, Router
 from aiogram.filters import Command, CommandStart
+from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from telegram.keyboards.inline import get_main_kb, main_menu
+from telegram.keyboards.inline import help_kb, main_menu_kb, mode_kb
+from telegram.ui import card, views
 
 router = Router(name="menu")
 logger = logging.getLogger(__name__)
 
-_WELCOME_TEXT = (
-    "👨‍⚕️ СИМУЛЯТОР ДЛЯ ВРАЧЕЙ BFU\n\n"
-    "🎯 Функционал бота:\n"
-    "• 🏥 Тренировка — интерактивные кейсы с пациентами\n"
-    "• 🤖 Реалистичный диалог — GigaChat имитирует пациента\n"
-    "• 🩺 Проверка диагноза — автоматическая оценка правильности\n\n"
-    "📋 Управление:\n"
-    "• /finish — выйти из диалога в любой момент\n"
-    "• /diagnosis — сразу перейти к постановке диагноза\n"
-    "• /start — главное меню\n\n"
-    "Выберите режим тренировки:"
-)
 
-_HELP_TEXT = (
-    "📖 Как пользоваться симулятором:\n\n"
-    "1️⃣ Начните — /start → «🏥 Тренажер»\n"
-    "2️⃣ Выберите болезнь из списка\n"
-    "3️⃣ Опрашивайте пациента (обычный текст)\n"
-    "4️⃣ Завершите — /diagnosis или /finish\n"
-    "5️⃣ Проверьте диагноз — напишите название болезни\n\n"
-    "✅ Готово к тренировке!"
-)
+async def show_main_menu(bot, chat_id: int, state: FSMContext) -> None:
+    """Сбрасывает диалоговое FSM-состояние и рендерит главное меню в карточке."""
+    await state.set_state(None)
+    await card.clear_reply_keyboard(bot, chat_id, state)
+    await card.render(bot, chat_id, state, views.WELCOME, kb=main_menu_kb())
 
 
 @router.message(CommandStart())
-async def cmd_start(msg: Message) -> None:
-    await msg.answer(_WELCOME_TEXT, parse_mode="HTML", reply_markup=get_main_kb())
+async def cmd_start(msg: Message, state: FSMContext) -> None:
+    # /start всегда возвращает в главное меню. Удаляем команду из чата, чтобы не мусорить.
+    await card.safe_delete(msg.bot, msg.chat.id, msg.message_id)
+    logger.info("Start: user_id=%s", msg.from_user.id if msg.from_user else None)
+    await show_main_menu(msg.bot, msg.chat.id, state)
 
 
-@router.callback_query(F.data == "start")
-async def cb_start(cb: CallbackQuery) -> None:
-    await cb.answer()
-    await cb.message.answer(_WELCOME_TEXT, parse_mode="HTML", reply_markup=main_menu())
-
-
-@router.message(F.text == "🏥 Тренажер")
-async def trainer_button(msg: Message) -> None:
-    logger.info("Trainer button: user_id=%s", msg.from_user.id if msg.from_user else None)
-    await msg.answer(
-        "🩺 Выберите режим:",
-        parse_mode="HTML",
-        reply_markup=main_menu(),
-    )
-
-
-@router.message(F.text == "ℹ️ Помощь")
 @router.message(Command("help"))
-async def cmd_help(msg: Message) -> None:
-    await msg.answer(_HELP_TEXT, parse_mode="HTML")
+async def cmd_help(msg: Message, state: FSMContext) -> None:
+    await card.safe_delete(msg.bot, msg.chat.id, msg.message_id)
+    await card.render(msg.bot, msg.chat.id, state, views.HELP, kb=help_kb())
+
+
+@router.callback_query(F.data == "menu:trainer")
+async def cb_trainer(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    await card.render(cb.bot, cb.message.chat.id, state, views.MODE_SELECT, kb=mode_kb())
+
+
+@router.callback_query(F.data == "menu:help")
+async def cb_help(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    await card.render(cb.bot, cb.message.chat.id, state, views.HELP, kb=help_kb())
+
+
+@router.callback_query(F.data == "nav:main")
+async def cb_nav_main(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    await show_main_menu(cb.bot, cb.message.chat.id, state)
+
+
+@router.callback_query(F.data == "nav:mode")
+async def cb_nav_mode(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    await card.render(cb.bot, cb.message.chat.id, state, views.MODE_SELECT, kb=mode_kb())

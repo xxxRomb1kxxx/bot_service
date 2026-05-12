@@ -1,292 +1,206 @@
+"""
+Диалог с пациентом, ввод диагноза и финальный отчёт — всё в одной карточке.
+
+Пользовательские текстовые сообщения удаляются сразу после обработки, чтобы
+чат не наполнялся историей. Контекст беседы хранится в FSM (последний обмен
+и счётчик вопросов) и подсветка в карточке.
+"""
 import asyncio
 import logging
+from typing import Optional
 
 from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.types import CallbackQuery, Message
 
 from dialog_engine.dialog_states import DialogState
-from telegram.keyboards.inline import (
-    BTN_DIAGNOSIS,
-    BTN_FINISH_CONSULTATION,
-    BTN_FINISH_DIALOG,
-)
 from telegram import api_client as api
+from telegram.keyboards.inline import (
+    back_to_menu_kb,
+    diagnosis_input_kb,
+    diagnosis_result_kb,
+    dialog_busy_kb,
+    dialog_kb,
+    report_kb,
+)
+from telegram.ui import card, views
 
 router = Router(name="dialog")
 logger = logging.getLogger(__name__)
 
-# Параметры polling ответа пациента.
-# POLL_TIMEOUT_SEC должен быть больше backend RESPONSE_TIMEOUT (обычно 60 с),
-# чтобы бот не выходил из цикла раньше, чем LLM успеет ответить.
+# Polling: окно ожидания ответа пациента в асинхронном режиме API.
 POLL_INTERVAL_SEC = 0.5
 POLL_TIMEOUT_SEC = 75
 POLL_MAX_ATTEMPTS = int(POLL_TIMEOUT_SEC / POLL_INTERVAL_SEC)
 
-# Категории атрибутов для группировки в отчёте «Завершить консультацию»
-_CATEGORY_TITLES = {
-    "complaints": "📋 Жалобы",
-    "anamnesis": "📖 Анамнез",
-    "diagnostics": "🔬 Обследования",
-}
+
+# ── Утилиты ───────────────────────────────────────────────────────────────────
+
+async def _delete_user_msg(msg: Message) -> None:
+    await card.safe_delete(msg.bot, msg.chat.id, msg.message_id)
 
 
-@router.message(Command("finish"))
-async def finish_dialog(msg: Message, state: FSMContext) -> None:
+async def _render_dialog(state: FSMContext, bot, chat_id: int, *, status: Optional[str] = None) -> None:
+    data = await state.get_data()
+    text = views.dialog_card(
+        mode=data.get("mode", "training"),
+        disease_name=data.get("disease_name", "?"),
+        patient=data.get("patient") or {},
+        last_question=data.get("last_question"),
+        last_reply=data.get("last_reply"),
+        q_count=int(data.get("q_count", 0) or 0),
+        status=status,
+    )
+    kb = dialog_busy_kb() if status else dialog_kb(data.get("mode", "training"))
+    await card.render(bot, chat_id, state, text, kb=kb)
+
+
+async def _abort_session(bot, chat_id: int, state: FSMContext) -> None:
+    """Снимает активную сессию на бэкенде и сбрасывает FSM."""
     data = await state.get_data()
     session_id = data.get("session_id")
-    tg_id = data.get("tg_id") or (msg.from_user.id if msg.from_user else None)
-    logger.info("Finish command: user_id=%s", tg_id)
-
+    tg_id = data.get("tg_id")
     if session_id and tg_id:
         try:
             await api.delete_session(session_id, tg_id)
         except Exception as e:
-            logger.warning("Could not delete session %s: %s", session_id, e)
-
-    await state.clear()
-    await msg.answer("✅ Диалог завершён.", reply_markup=ReplyKeyboardRemove())
-    await msg.answer("Для нового кейса нажмите /start")
-
-
-@router.message(Command("diagnosis"))
-async def force_diagnosis(msg: Message, state: FSMContext) -> None:
-    data = await state.get_data()
-    logger.info("Diagnosis command: user_id=%s", data.get("tg_id") or (msg.from_user.id if msg.from_user else None))
-    if not data.get("session_id"):
-        await msg.answer("Сначала начните кейс! Нажмите /start")
-        return
-    if data.get("mode") == "training":
-        await msg.answer(
-            "В тренировке постановка диагноза не используется — нажмите «✅ Завершить консультацию»."
-        )
-        return
-    await state.set_state(DialogState.waiting_diagnosis)
-    await msg.answer("📝 Поставьте диагноз — напишите его текстом:")
+            logger.warning("delete_session failed: %s", e)
+    # Сохраняем только card_id и флаг очищенной reply-клавиатуры, чтобы
+    # дальше всё лилось в ту же карточку.
+    card_id = data.get("card_id")
+    reply_cleared = data.get("reply_kb_cleared", False)
+    await state.set_state(None)
+    await state.set_data({"card_id": card_id, "reply_kb_cleared": reply_cleared})
 
 
-async def force_finish_consultation(msg: Message, state: FSMContext) -> None:
-    """Тренировочный режим: завершить консультацию и получить отчёт."""
-    data = await state.get_data()
-    session_id = data.get("session_id")
-    tg_id = data.get("tg_id") or (msg.from_user.id if msg.from_user else None)
-    logger.info("Finish consultation: user_id=%s", tg_id)
-
-    if not session_id or not tg_id:
-        await msg.answer("Сначала начните кейс! Нажмите /start", reply_markup=ReplyKeyboardRemove())
-        await state.clear()
-        return
-
-    placeholder = await msg.answer("⏳ Анализирую консультацию…")
-
-    try:
-        result = await api.finish_consultation(session_id, tg_id)
-    except api.BackendError as e:
-        if e.status in (404, 409):
-            await placeholder.edit_text(
-                "Сессия уже завершена. Начните новый кейс через /start"
-            )
-            await state.clear()
-            return
-        if e.status in (502, 504):
-            await placeholder.edit_text(
-                "⏳ Сервер не успел подготовить отчёт за отведённое время. "
-                "Подождите минуту и нажмите «Завершить консультацию» ещё раз — "
-                "оценка может уже быть готова."
-            )
-            return
-        logger.warning("finish-consultation backend error: %s %s", e.status, e.detail)
-        await placeholder.edit_text("Произошла ошибка. Попробуйте ещё раз.")
-        return
-
-    text = _format_consultation_report(result)
-    await placeholder.edit_text(text, parse_mode="HTML")
-    await msg.answer(
-        "Тренировка завершена. Для нового кейса нажмите /start",
-        reply_markup=ReplyKeyboardRemove(),
-    )
-    await state.clear()
-
-
-def _format_consultation_report(result: dict) -> str:
-    disease_name = result.get("disease_name", "?")
-    coverage_pct = round(float(result.get("coverage", 0.0)) * 100)
-    total_pct = round(float(result.get("total_score", 0.0)) * 100)
-    lq = result.get("language_quality") or {}
-    grade = int(lq.get("grade", 0) or 0)
-    lq_comment = (lq.get("comment") or "").strip()
-    lq_errors = lq.get("errors") or []
-    attributes = result.get("attributes") or []
-
-    grouped: dict[str, list[tuple[bool, str]]] = {"complaints": [], "anamnesis": [], "diagnostics": []}
-    for a in attributes:
-        cat = a.get("category", "")
-        grouped.setdefault(cat, []).append((bool(a.get("collected")), str(a.get("label", ""))))
-
-    lines: list[str] = []
-    lines.append(f"📊 Отчёт по тренировке: <b>{disease_name}</b>")
-    lines.append("")
-    lines.append("<b>Атрибуты:</b>")
-    for cat, items in grouped.items():
-        if not items:
-            continue
-        lines.append(_CATEGORY_TITLES.get(cat, cat))
-        for collected, label in items:
-            icon = "✅" if collected else "❌"
-            lines.append(f"  {icon} {label}")
-
-    collected_count = sum(1 for a in attributes if a.get("collected"))
-    total_count = len(attributes)
-    lines.append("")
-    lines.append(f"📈 Покрытие: {collected_count}/{total_count} ({coverage_pct}%)")
-
-    lines.append("")
-    grade_label = f"{grade}/5" if grade > 0 else "не оценено"
-    lines.append(f"📝 Качество русского языка: {grade_label}")
-    if lq_comment:
-        lines.append(f"<i>{lq_comment}</i>")
-    if lq_errors:
-        lines.append("Замечания:")
-        for err in lq_errors:
-            lines.append(f"  • {err}")
-
-    lines.append("")
-    lines.append(f"🏆 Итоговый балл: <b>{total_pct}%</b>")
-    return "\n".join(lines)
-
-
-# ── Кнопки управления (reply keyboard) ────────────────────────────────────────
-# Должны быть зарегистрированы ДО handle_dialog, иначе текст кнопки уйдёт пациенту.
-
-@router.message(F.text == BTN_FINISH_DIALOG)
-async def on_btn_finish_dialog(msg: Message, state: FSMContext) -> None:
-    await finish_dialog(msg, state)
-
-
-@router.message(F.text == BTN_DIAGNOSIS)
-async def on_btn_diagnosis(msg: Message, state: FSMContext) -> None:
-    await force_diagnosis(msg, state)
-
-
-@router.message(F.text == BTN_FINISH_CONSULTATION)
-async def on_btn_finish_consultation(msg: Message, state: FSMContext) -> None:
-    await force_finish_consultation(msg, state)
-
+# ── Ввод вопроса (state=waiting_question) ─────────────────────────────────────
 
 @router.message(DialogState.waiting_question)
 async def handle_dialog(msg: Message, state: FSMContext) -> None:
     user_id = msg.from_user.id if msg.from_user else None
-    logger.info("Dialog message: user_id=%s, text=%r", user_id, msg.text)
+    text = (msg.text or "").strip()
+    logger.info("Dialog message: user_id=%s, text=%r", user_id, text[:100])
+
+    await _delete_user_msg(msg)
+    if not text:
+        return
 
     data = await state.get_data()
     session_id = data.get("session_id")
     tg_id = data.get("tg_id") or user_id
-
     if not session_id or not tg_id:
-        await msg.answer("Произошла ошибка состояния. Начните новый кейс через /start")
-        await state.clear()
+        await card.render(
+            msg.bot, msg.chat.id, state,
+            views.error_card("Сессия потеряна. Начните новый кейс."),
+            kb=back_to_menu_kb(),
+        )
+        await state.set_state(None)
         return
 
-    placeholder = await msg.answer("⏳")
+    # Сразу показываем «обдумывает» с текущим вопросом, чтобы пользователь видел
+    # прогресс и не нервничал во время LLM-вызова.
+    await state.update_data(last_question=text)
+    await _render_dialog(state, msg.bot, msg.chat.id, status="Пациент обдумывает ответ…")
 
     try:
-        queued = await api.send_message(session_id, msg.text or "", tg_id)
+        queued = await api.send_message(session_id, text, tg_id)
     except api.BackendError as e:
-        if e.status == 409:
-            await state.clear()
-            await placeholder.edit_text("Сессия уже завершена. Начните новый кейс через /start")
-        elif e.status == 404:
-            await state.clear()
-            await placeholder.edit_text("Сессия не найдена. Начните новый кейс через /start")
-        elif e.status == 422:
-            detail = e.detail
-            if isinstance(detail, dict):
-                user_msg = detail.get("message", "Пожалуйста, задавайте вопросы в рамках медицинского осмотра.")
-            else:
-                user_msg = "Пожалуйста, задавайте вопросы в рамках медицинского осмотра."
-            await placeholder.edit_text(f"⚠️ {user_msg}")
-        elif e.status in (502, 503, 504):
-            logger.warning("Transient backend error %s for user %s: %s", e.status, user_id, e.detail)
-            await placeholder.edit_text(
-                "⏳ Сервер сейчас перегружен и не успел ответить. "
-                "Подождите минуту и повторите вопрос."
-            )
-        else:
-            logger.warning("Backend error %s for user %s: %s", e.status, user_id, e.detail)
-            await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
+        await _handle_send_error(state, msg.bot, msg.chat.id, e, user_id)
         return
 
-    # Бэкенд может ответить либо синхронно (готовый patient_reply / reply прямо в
-    # POST /message — сейчас именно так), либо асинхронно (message_id для polling).
-    # Поддерживаем оба варианта.
+    reply = await _resolve_reply(queued, session_id, tg_id, state, msg.bot, msg.chat.id)
+    if reply is None:
+        # _resolve_reply сам рендерит ошибку в карточку
+        return
+
+    # Успешный ответ: обновляем историю и рендерим обычную карточку.
+    await state.update_data(
+        last_reply=str(reply),
+        q_count=int(data.get("q_count", 0) or 0) + 1,
+    )
+    await _render_dialog(state, msg.bot, msg.chat.id)
+
+
+async def _handle_send_error(state, bot, chat_id, e: api.BackendError, user_id) -> None:
+    if e.status in (404, 409):
+        await card.render(
+            bot, chat_id, state,
+            views.error_card("Сессия уже завершена или не найдена."),
+            kb=back_to_menu_kb(),
+        )
+        await _abort_session(bot, chat_id, state)
+        return
+    if e.status == 422:
+        detail = e.detail
+        msg_text = (
+            detail.get("message")
+            if isinstance(detail, dict) else None
+        ) or "Пожалуйста, задавайте вопросы в рамках медицинского осмотра."
+        # Не считаем это «ошибкой» — просто подмешиваем подсказку в карточку диалога.
+        await _render_dialog(state, bot, chat_id, status=f"⚠️ {msg_text}")
+        return
+    if e.status in (502, 503, 504):
+        logger.warning("Transient backend error %s for user %s: %s", e.status, user_id, e.detail)
+        await _render_dialog(
+            state, bot, chat_id,
+            status="Сервер сейчас перегружен — повторите вопрос через минуту.",
+        )
+        return
+    logger.warning("Backend error %s for user %s: %s", e.status, user_id, e.detail)
+    await _render_dialog(state, bot, chat_id, status="Произошла ошибка. Попробуйте повторить вопрос.")
+
+
+async def _resolve_reply(queued: dict, session_id, tg_id, state, bot, chat_id) -> Optional[str]:
+    """Достаёт ответ пациента: либо сразу из POST /message (синхронный режим),
+    либо через polling GET /messages/{id} (асинхронный режим), либо через
+    fallback /status. При окончательной неудаче рендерит карточку с ошибкой
+    и возвращает None."""
     sync_reply = (
         queued.get("patient_reply")
         or queued.get("reply")
         or queued.get("last_reply")
     )
     if sync_reply is not None:
-        logger.info("Got synchronous reply for session %s", session_id)
-        await _send_reply(placeholder, msg, str(sync_reply))
-        return
+        return str(sync_reply)
 
     message_id = queued.get("message_id")
     if not message_id:
         logger.warning("send_message returned neither reply nor message_id: %r", queued)
-        await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
-        return
+        await _render_dialog(state, bot, chat_id, status="Произошла ошибка. Попробуйте повторить.")
+        return None
 
-    logger.info("Polling message %s for session %s", message_id, session_id)
-
-    # Polling ответа пациента.
-    # Sleep перенесён в конец итерации — первый запрос уходит сразу, без задержки.
-    # Если задача была видна (status=processing) и вернулась 404 — бэкенд завершил
-    # обработку и удалил запись; выходим в fallback немедленно.
     reply = None
     task_seen = False
     for attempt in range(POLL_MAX_ATTEMPTS):
         try:
             data = await api.get_message_result(session_id, message_id, tg_id)
             task_seen = True
-            logger.info("Poll attempt %d: status=%s reply=%r", attempt + 1, data.get("status"), data.get("reply"))
         except api.BackendError as e:
             if e.status == 404:
                 if task_seen:
-                    logger.info("Task %s cleaned up after processing, falling back to session status", message_id)
                     break
                 await asyncio.sleep(POLL_INTERVAL_SEC)
                 continue
-            # Транзиентные ошибки (таймаут опроса, временная недоступность бэкенда,
-            # сетевой сбой) не должны убивать polling: задача в фоне, скорее всего,
-            # ещё обрабатывается. Логируем и продолжаем — общее окно POLL_TIMEOUT_SEC
-            # даёт ей шанс завершиться.
             if e.status in (502, 503, 504):
-                logger.info("Poll attempt %d transient error %s, retrying", attempt + 1, e.status)
                 await asyncio.sleep(POLL_INTERVAL_SEC)
                 continue
-            logger.warning("Poll attempt %d error: status=%s detail=%s", attempt + 1, e.status, e.detail)
-            await placeholder.edit_text("Произошла ошибка. Попробуйте повторить вопрос.")
-            return
+            logger.warning("Poll error %s: %s", e.status, e.detail)
+            await _render_dialog(state, bot, chat_id, status="Произошла ошибка. Попробуйте повторить.")
+            return None
 
-        # Баг #1: бэкенд сигнализирует об ошибке обработки через status=error
         if data.get("status") == "error":
             err = data.get("error") or "Не удалось обработать запрос"
-            logger.warning("Async task failed: msg_id=%s err=%r", message_id, err)
-            await placeholder.edit_text(f"⚠️ {err}")
-            return
-
+            await _render_dialog(state, bot, chat_id, status=f"⚠️ {err}")
+            return None
         if data.get("reply") is not None:
-            logger.info("Got reply on attempt %d", attempt + 1)
             reply = data["reply"]
             break
-
         await asyncio.sleep(POLL_INTERVAL_SEC)
 
-    # Fallback: задача исчезла до первого poll или была очищена после обработки
     if reply is None:
         try:
             status_data = await api.get_session_status(session_id, tg_id)
-            logger.info("Session status fallback: %s", status_data)
             reply = (
                 status_data.get("last_reply")
                 or status_data.get("reply")
@@ -296,118 +210,242 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
             logger.warning("Session status fallback error: %s %s", e.status, e.detail)
 
     if reply is None:
-        await placeholder.edit_text("Пациент не ответил вовремя. Попробуйте ещё раз.")
+        await _render_dialog(state, bot, chat_id, status="Пациент не ответил вовремя. Попробуйте ещё раз.")
+        return None
+    return str(reply)
+
+
+# ── Кнопки во время диалога ───────────────────────────────────────────────────
+
+@router.callback_query(F.data == "dlg:finish")
+async def cb_finish_consultation(cb: CallbackQuery, state: FSMContext) -> None:
+    """Тренировочный режим: завершить и получить отчёт."""
+    await cb.answer("Готовлю отчёт…")
+    data = await state.get_data()
+    session_id = data.get("session_id")
+    tg_id = data.get("tg_id")
+    if not session_id or not tg_id:
+        await card.render(
+            cb.bot, cb.message.chat.id, state,
+            views.error_card("Сессия потеряна."),
+            kb=back_to_menu_kb(),
+        )
         return
-    await _send_reply(placeholder, msg, str(reply))
 
+    await _render_dialog(state, cb.bot, cb.message.chat.id, status="Анализирую консультацию…")
 
-def _split_long(text: str, max_len: int) -> list[str]:
-    """Разбивает текст на куски ≤ max_len, стараясь резать по абзацам или строкам."""
-    chunks: list[str] = []
-    while len(text) > max_len:
-        cut = text.rfind("\n\n", 0, max_len)
-        if cut < max_len // 2:
-            cut = text.rfind("\n", 0, max_len)
-        if cut < max_len // 2:
-            cut = max_len
-        chunks.append(text[:cut].rstrip())
-        text = text[cut:].lstrip()
-    if text:
-        chunks.append(text)
-    return chunks
-
-
-_MAX_MESSAGE_LEN = 4000
-
-
-async def _send_reply(placeholder, msg: Message, text: str) -> None:
-    """Отправляет ответ пациента. Если длиннее 4000 символов — бьёт на части,
-    чтобы не словить TelegramBadRequest (лимит 4096 символов на сообщение).
-    Reply-клавиатура управления уже закреплена внизу — её здесь не трогаем."""
-    if len(text) <= _MAX_MESSAGE_LEN:
-        await placeholder.edit_text(text)
+    try:
+        result = await api.finish_consultation(session_id, tg_id)
+    except api.BackendError as e:
+        if e.status in (404, 409):
+            await card.render(
+                cb.bot, cb.message.chat.id, state,
+                views.error_card("Сессия уже завершена."),
+                kb=back_to_menu_kb(),
+            )
+            await _abort_session(cb.bot, cb.message.chat.id, state)
+            return
+        if e.status in (502, 504):
+            await _render_dialog(
+                state, cb.bot, cb.message.chat.id,
+                status="Сервер не успел подготовить отчёт. Подождите минуту и нажмите ещё раз.",
+            )
+            return
+        logger.warning("finish-consultation error: %s %s", e.status, e.detail)
+        await _render_dialog(
+            state, cb.bot, cb.message.chat.id,
+            status="Произошла ошибка. Попробуйте ещё раз.",
+        )
         return
-    await placeholder.edit_text("📝 Ответ пациента:")
-    for chunk in _split_long(text, _MAX_MESSAGE_LEN):
-        await msg.answer(chunk)
 
+    # Кладём результат в FSM, чтобы вкладки отчёта могли перерендериваться без повторного запроса.
+    await state.set_state(None)
+    await state.update_data(report=result, session_id=None)
+    await card.render(
+        cb.bot, cb.message.chat.id, state,
+        views.report_attributes_card(result),
+        kb=report_kb("attributes"),
+    )
+
+
+@router.callback_query(F.data == "dlg:diagnosis")
+async def cb_to_diagnosis(cb: CallbackQuery, state: FSMContext) -> None:
+    """Контрольный режим: переход к вводу диагноза."""
+    await cb.answer()
+    data = await state.get_data()
+    await state.set_state(DialogState.waiting_diagnosis)
+    text = views.diagnosis_prompt_card(
+        patient=data.get("patient") or {},
+        q_count=int(data.get("q_count", 0) or 0),
+    )
+    await card.render(cb.bot, cb.message.chat.id, state, text, kb=diagnosis_input_kb())
+
+
+@router.callback_query(F.data == "dlg:cancel_diagnosis")
+async def cb_cancel_diagnosis(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    await state.set_state(DialogState.waiting_question)
+    await _render_dialog(state, cb.bot, cb.message.chat.id)
+
+
+@router.callback_query(F.data == "dlg:abort")
+async def cb_abort(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer("Кейс прерван")
+    from telegram.handlers.menu import show_main_menu
+
+    await _abort_session(cb.bot, cb.message.chat.id, state)
+    await show_main_menu(cb.bot, cb.message.chat.id, state)
+
+
+# ── Ввод диагноза (state=waiting_diagnosis) ───────────────────────────────────
 
 @router.message(DialogState.waiting_diagnosis)
 async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
     user_id = msg.from_user.id if msg.from_user else None
-    logger.info("Diagnosis message: user_id=%s, text=%r", user_id, msg.text)
+    text = (msg.text or "").strip()
+    await _delete_user_msg(msg)
+    if not text:
+        return
 
     data = await state.get_data()
     session_id = data.get("session_id")
     tg_id = data.get("tg_id") or user_id
-
     if not session_id or not tg_id:
-        await msg.answer("Произошла ошибка состояния. Начните новый кейс через /start")
-        await state.clear()
+        await card.render(
+            msg.bot, msg.chat.id, state,
+            views.error_card("Сессия потеряна."),
+            kb=back_to_menu_kb(),
+        )
+        await state.set_state(None)
         return
 
-    placeholder = await msg.answer("⏳")
+    # Показываем «отправляю диагноз…» в текущей карточке диагностики.
+    prompt_text = views.diagnosis_prompt_card(
+        patient=data.get("patient") or {},
+        q_count=int(data.get("q_count", 0) or 0),
+    ) + "\n\n⏳ <i>Проверяю диагноз…</i>"
+    await card.render(msg.bot, msg.chat.id, state, prompt_text, kb=dialog_busy_kb())
 
     try:
-        result = await api.submit_diagnosis(session_id, msg.text or "", tg_id)
+        result = await api.submit_diagnosis(session_id, text, tg_id)
     except api.BackendError as e:
         if e.status == 422:
             detail = e.detail
-            if isinstance(detail, dict):
-                user_msg = detail.get("message", "Некорректный ввод. Попробуйте ещё раз.")
-            else:
-                user_msg = "Некорректный ввод. Попробуйте ещё раз."
-            await placeholder.edit_text(f"⚠️ {user_msg}")
-        elif e.status in (502, 503, 504):
-            logger.warning("Transient backend error %s for user %s: %s", e.status, user_id, e.detail)
-            await placeholder.edit_text(
-                "⏳ Сервер сейчас перегружен и не успел обработать диагноз. "
-                "Подождите минуту и отправьте ещё раз."
+            user_msg = (detail.get("message") if isinstance(detail, dict) else None) \
+                or "Некорректный ввод. Попробуйте ещё раз."
+            await card.render(
+                msg.bot, msg.chat.id, state,
+                views.diagnosis_prompt_card(
+                    patient=data.get("patient") or {},
+                    q_count=int(data.get("q_count", 0) or 0),
+                ) + f"\n\n⚠️ <i>{user_msg}</i>",
+                kb=diagnosis_input_kb(),
             )
-        else:
-            logger.warning("Backend error %s for user %s: %s", e.status, user_id, e.detail)
-            await placeholder.edit_text("Произошла ошибка при отправке диагноза. Попробуйте ещё раз.")
+            return
+        if e.status in (502, 503, 504):
+            await card.render(
+                msg.bot, msg.chat.id, state,
+                views.diagnosis_prompt_card(
+                    patient=data.get("patient") or {},
+                    q_count=int(data.get("q_count", 0) or 0),
+                ) + "\n\n⏳ <i>Сервер перегружен. Подождите минуту и отправьте ещё раз.</i>",
+                kb=diagnosis_input_kb(),
+            )
+            return
+        logger.warning("submit_diagnosis error: %s %s", e.status, e.detail)
+        await card.render(
+            msg.bot, msg.chat.id, state,
+            views.error_card("Не удалось отправить диагноз."),
+            kb=back_to_menu_kb(),
+        )
+        await _abort_session(msg.bot, msg.chat.id, state)
         return
 
-    icon = "✅" if result["is_correct"] else "❌"
-    score_pct = round(result["score"] * 100)
-
-    await placeholder.edit_text(
-        f"{icon} Результат: {result['message']}\n\n"
-        f"Ваш диагноз: <i>{result['user_diagnosis']}</i>\n"
-        f"Верный диагноз: {result['correct_diagnosis']}\n"
-        f"Оценка: {score_pct}%",
-        parse_mode="HTML",
-    )
-
-    card = result.get("card", {})
-    lines = []
-    if card.get("complaints"):
-        lines.append("📋 Жалобы:\n" + "\n".join(f"• {c}" for c in card["complaints"]))
-    if card.get("anamnesis"):
-        lines.append("📖 Анамнез:\n" + "\n".join(f"• {a}" for a in card["anamnesis"]))
-    if card.get("diagnostics"):
-        lines.append("🔬 Обследования:\n" + "\n".join(f"• {d}" for d in card["diagnostics"]))
-    if lines:
-        await msg.answer("\n\n".join(lines), parse_mode="HTML")
-
-    lq = result.get("language_quality") or {}
-    grade = int(lq.get("grade", 0) or 0)
-    if grade > 0 or lq.get("comment") or lq.get("errors"):
-        lq_lines = [f"📝 Качество русского языка: {grade}/5" if grade > 0 else "📝 Качество русского языка: не оценено"]
-        comment = (lq.get("comment") or "").strip()
-        if comment:
-            lq_lines.append(f"<i>{comment}</i>")
-        errors = lq.get("errors") or []
-        if errors:
-            lq_lines.append("Замечания:")
-            lq_lines.extend(f"  • {e}" for e in errors)
-        await msg.answer("\n".join(lq_lines), parse_mode="HTML")
-
-    await state.clear()
-    await msg.answer(
-        "Диалог завершён. Для нового кейса нажмите /start",
-        reply_markup=ReplyKeyboardRemove(),
+    # Готово: показываем карточку результата с кнопкой «Готово».
+    await state.set_state(None)
+    await state.update_data(session_id=None, report=result)
+    await card.render(
+        msg.bot, msg.chat.id, state,
+        views.diagnosis_result_card(result),
+        kb=diagnosis_result_kb(),
     )
 
 
+# ── Вкладки отчёта ────────────────────────────────────────────────────────────
+
+@router.callback_query(F.data.startswith("report:tab:"))
+async def cb_report_tab(cb: CallbackQuery, state: FSMContext) -> None:
+    await cb.answer()
+    data = await state.get_data()
+    result = data.get("report") or {}
+    tab = cb.data.split(":", 2)[2]
+    if tab == "language":
+        text = views.report_language_card(result)
+    elif tab == "summary":
+        text = views.report_summary_card(result)
+    else:
+        text = views.report_attributes_card(result)
+    await card.render(cb.bot, cb.message.chat.id, state, text, kb=report_kb(tab))
+
+
+@router.callback_query(F.data == "report:done")
+async def cb_report_done(cb: CallbackQuery, state: FSMContext) -> None:
+    """«Готово» — удаляем карточку отчёта и показываем чистое главное меню."""
+    await cb.answer("Готово")
+    from telegram.handlers.menu import show_main_menu
+
+    # Удаляем старую карточку отчёта целиком, чтобы пользователь начал с чистого листа.
+    await card.delete(cb.bot, cb.message.chat.id, state)
+    await state.set_state(None)
+    # Сохраняем только флаг очищенной reply-клавиатуры (от старой версии бота).
+    data = await state.get_data()
+    await state.set_data({"reply_kb_cleared": data.get("reply_kb_cleared", False)})
+    await show_main_menu(cb.bot, cb.message.chat.id, state)
+
+
+# ── Команды совместимости ─────────────────────────────────────────────────────
+# Команды /finish и /diagnosis оставлены для обратной совместимости. Они теперь
+# работают как кнопки «прервать» и «поставить диагноз» — просто эмулируем
+# поведение и удаляем команду из чата.
+
+@router.message(Command("finish"))
+async def cmd_finish(msg: Message, state: FSMContext) -> None:
+    await _delete_user_msg(msg)
+    from telegram.handlers.menu import show_main_menu
+
+    await _abort_session(msg.bot, msg.chat.id, state)
+    await show_main_menu(msg.bot, msg.chat.id, state)
+
+
+@router.message(Command("diagnosis"))
+async def cmd_diagnosis(msg: Message, state: FSMContext) -> None:
+    await _delete_user_msg(msg)
+    data = await state.get_data()
+    if not data.get("session_id"):
+        await card.render(
+            msg.bot, msg.chat.id, state,
+            views.error_card("Сначала начните кейс через главное меню."),
+            kb=back_to_menu_kb(),
+        )
+        return
+    if data.get("mode") == "training":
+        await _render_dialog(
+            state, msg.bot, msg.chat.id,
+            status="В тренировке диагноз не вводится — используйте «Завершить и получить отчёт».",
+        )
+        return
+    await state.set_state(DialogState.waiting_diagnosis)
+    text = views.diagnosis_prompt_card(
+        patient=data.get("patient") or {},
+        q_count=int(data.get("q_count", 0) or 0),
+    )
+    await card.render(msg.bot, msg.chat.id, state, text, kb=diagnosis_input_kb())
+
+
+# ── Фолбэк: любой текст вне состояний удаляется, карточка не меняется ─────────
+
+@router.message(F.text)
+async def fallback_text(msg: Message, state: FSMContext) -> None:
+    """Если пользователь пишет что-то вне диалога/диагноза — просто удаляем
+    сообщение, чтобы чат оставался чистым. Карточку не трогаем."""
+    await _delete_user_msg(msg)
