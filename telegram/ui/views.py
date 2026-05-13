@@ -274,23 +274,22 @@ def report_summary_card(result: dict, diagnosis: Optional[dict] = None) -> str:
 def diagnosis_result_card(result: dict) -> str:
     is_correct = bool(result.get("is_correct"))
     icon = "✅" if is_correct else "❌"
+    verdict = "Верно" if is_correct else "Неверно"
     user_dx = str(result.get("user_diagnosis", "—"))
     true_dx = str(result.get("correct_diagnosis", "—"))
     score_pct = round(float(result.get("score", 0.0)) * 100)
-    msg = str(result.get("message", "")).strip()
 
+    # Бэкенд в `message` уже шлёт всю ту же инфу строкой — её не показываем,
+    # чтобы избежать дублирования с структурированными полями ниже.
     lines = [
-        f"<b>{icon} Результат диагноза</b>",
+        f"<b>{icon} Результат диагноза — {verdict}</b>",
         HR,
+        f"<b>Ваш диагноз:</b> {escape(user_dx)}",
+        f"<b>Верный диагноз:</b> {escape(true_dx)}",
+        "",
+        HR,
+        f"<b>🏆 Оценка:</b> {score_pct}%",
     ]
-    if msg:
-        lines.append(f"<i>{escape(msg)}</i>")
-        lines.append("")
-    lines.append(f"<b>Ваш диагноз:</b> {escape(user_dx)}")
-    lines.append(f"<b>Верный диагноз:</b> {escape(true_dx)}")
-    lines.append("")
-    lines.append(HR)
-    lines.append(f"<b>🏆 Оценка:</b> {score_pct}%")
     return "\n".join(lines)
 
 

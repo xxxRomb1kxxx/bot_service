@@ -307,12 +307,35 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
         )
         return
 
+    diagnosis: Optional[dict] = None
+    report: Optional[dict] = None
     try:
         async with ChatActionSender.typing(bot=msg.bot, chat_id=msg.chat.id):
-            diagnosis = await api.submit_diagnosis(session_id, text, tg_id)
-            # Сразу подтягиваем полный отчёт (атрибуты + язык + итог), чтобы
-            # в контрольном режиме показывать те же вкладки, что в тренировке.
-            report = await _fetch_report_after_diagnosis(session_id, tg_id)
+            # 1) Сначала забираем полный отчёт (атрибуты, язык, итог), пока
+            #    сессия гарантированно активна. В контрольном режиме после
+            #    submit_diagnosis бэкенд закрывает сессию, и эти данные
+            #    становятся недостижимыми.
+            try:
+                report = await api.finish_consultation(session_id, tg_id)
+                logger.info(
+                    "Report fetched before diagnosis: keys=%s",
+                    sorted(report.keys()) if isinstance(report, dict) else type(report).__name__,
+                )
+            except api.BackendError as e:
+                if e.status not in (404, 409, 502, 503, 504):
+                    raise
+                logger.info("finish_consultation pre-diagnosis failed (%s): %s", e.status, e.detail)
+
+            # 2) Проверяем диагноз. Если сессию уже закрыл предыдущий вызов,
+            #    собираем результат локально на основе disease_name из отчёта.
+            try:
+                diagnosis = await api.submit_diagnosis(session_id, text, tg_id)
+            except api.BackendError as e:
+                if e.status in (404, 409) and report:
+                    diagnosis = _synthesize_diagnosis(text, report)
+                    logger.info("Synthesized diagnosis (session closed by finish_consultation)")
+                else:
+                    raise
     except api.BackendError as e:
         if e.status == 422:
             detail = e.detail
@@ -335,6 +358,10 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
         )
         return
 
+    # Если отчёт не пришёл первым звонком — добиваем фолбэком (status и т. п.).
+    if not report:
+        report = await _fetch_report_after_diagnosis(session_id, tg_id)
+
     await state.set_state(None)
     await state.update_data(session_id=None, diagnosis=diagnosis, report=report or {})
     # Всегда показываем полный набор вкладок: даже если отчёт не пришёл,
@@ -344,6 +371,30 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
         views.diagnosis_result_card(diagnosis),
         reply_kb=report_kb(include_diagnosis=True),
     )
+
+
+def _synthesize_diagnosis(user_text: str, report: dict) -> dict:
+    """Локальная проверка диагноза, если бэкенд закрыл сессию первым вызовом.
+
+    Сверяем введённый врачом текст с `disease_name` из отчёта. Это грубая
+    проверка по подстроке — без семантики и фаззи-матчинга бэкенда, но лучше
+    чем «не удалось проверить».
+    """
+    correct = (report.get("disease_name") or "").strip()
+    user_norm = user_text.strip().lower()
+    correct_norm = correct.lower()
+    is_correct = bool(correct_norm) and (
+        user_norm == correct_norm
+        or user_norm in correct_norm
+        or correct_norm in user_norm
+    )
+    return {
+        "is_correct": is_correct,
+        "user_diagnosis": user_text,
+        "correct_diagnosis": correct or "—",
+        "score": 1.0 if is_correct else 0.0,
+        "message": "",
+    }
 
 
 async def _fetch_report_after_diagnosis(session_id: str, tg_id: int) -> Optional[dict]:
