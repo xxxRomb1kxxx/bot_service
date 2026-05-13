@@ -180,7 +180,7 @@ def _format_attributes_section(attributes: list[dict]) -> list[str]:
             continue
         out.append(f"<b>{titles.get(cat, cat)}</b>")
         for collected, label in items:
-            icon = "✅" if collected else "⬜️"
+            icon = "✅" if collected else "❌"
             out.append(f"  {icon} {escape(label)}")
         out.append("")
     return out
