@@ -318,7 +318,7 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
             try:
                 report = await api.finish_consultation(session_id, tg_id)
                 logger.info(
-                    "Report fetched before diagnosis: keys=%s",
+                    "finish_consultation response keys=%s",
                     sorted(report.keys()) if isinstance(report, dict) else type(report).__name__,
                 )
             except api.BackendError as e:
@@ -326,16 +326,23 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
                     raise
                 logger.info("finish_consultation pre-diagnosis failed (%s): %s", e.status, e.detail)
 
-            # 2) Проверяем диагноз. Если сессию уже закрыл предыдущий вызов,
-            #    собираем результат локально на основе disease_name из отчёта.
+            # 2) Проверяем диагноз. Ответ submit_diagnosis в некоторых сборках
+            #    бэкенда сам несёт language_quality / attributes — поэтому
+            #    мерджим оба ответа в один отчёт.
             try:
                 diagnosis = await api.submit_diagnosis(session_id, text, tg_id)
+                logger.info(
+                    "submit_diagnosis response keys=%s",
+                    sorted(diagnosis.keys()) if isinstance(diagnosis, dict) else type(diagnosis).__name__,
+                )
             except api.BackendError as e:
                 if e.status in (404, 409) and report:
                     diagnosis = _synthesize_diagnosis(text, report)
                     logger.info("Synthesized diagnosis (session closed by finish_consultation)")
                 else:
                     raise
+
+            report = _merge_report(report, diagnosis)
     except api.BackendError as e:
         if e.status == 422:
             detail = e.detail
@@ -371,6 +378,49 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
         views.diagnosis_result_card(diagnosis),
         reply_kb=report_kb(include_diagnosis=True),
     )
+
+
+_REPORT_KEYS = ("attributes", "language_quality", "coverage", "total_score", "disease_name")
+
+
+def _is_empty_report_value(key: str, value) -> bool:
+    """Эвристика: какое значение поля отчёта считаем «пустым» и заслуживающим
+    замены данными из второго ответа бэкенда."""
+    if value is None:
+        return True
+    if key == "language_quality":
+        if not isinstance(value, dict):
+            return True
+        grade = value.get("grade")
+        return not grade
+    if key in ("attributes",):
+        return not value  # пустой список
+    if key in ("coverage", "total_score"):
+        try:
+            return float(value or 0) == 0.0
+        except (TypeError, ValueError):
+            return True
+    if key == "disease_name":
+        return not str(value).strip()
+    return not value
+
+
+def _merge_report(primary: Optional[dict], secondary: Optional[dict]) -> dict:
+    """Объединяет два ответа бэкенда в один отчёт.
+
+    Берём всё из `primary` (ответ finish_consultation), а пустые/нулевые поля
+    добиваем из `secondary` (ответ submit_diagnosis): в некоторых сборках
+    бэкенда оценка языка попадает именно туда.
+    """
+    merged: dict = dict(primary or {})
+    if not isinstance(secondary, dict):
+        return merged
+    for key in _REPORT_KEYS:
+        if key not in secondary:
+            continue
+        if _is_empty_report_value(key, merged.get(key)):
+            merged[key] = secondary[key]
+    return merged
 
 
 def _synthesize_diagnosis(user_text: str, report: dict) -> dict:
