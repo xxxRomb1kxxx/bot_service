@@ -14,7 +14,7 @@ from typing import Optional
 from aiogram import Bot
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.fsm.context import FSMContext
-from aiogram.types import InlineKeyboardMarkup, ReplyKeyboardRemove
+from aiogram.types import ReplyKeyboardMarkup, ReplyKeyboardRemove
 
 logger = logging.getLogger(__name__)
 
@@ -24,12 +24,13 @@ async def render(
     chat_id: int,
     state: FSMContext,
     text: str,
-    kb: Optional[InlineKeyboardMarkup] = None,
+    kb=None,
 ) -> int:
     """Рендерит карточку: правит существующее сообщение, иначе создаёт новое.
 
-    Возвращает message_id карточки. При edit-not-modified / edit-not-found /
-    permissions silently отступаем к созданию нового сообщения.
+    Все управляющие кнопки — reply-клавиатура у поля ввода, поэтому само
+    сообщение карточки никогда не имеет inline-клавиатуры (`kb` игнорируется,
+    оставлен для совместимости со старыми вызовами).
     """
     data = await state.get_data()
     card_id: Optional[int] = data.get("card_id")
@@ -40,7 +41,7 @@ async def render(
                 chat_id=chat_id,
                 message_id=card_id,
                 text=text,
-                reply_markup=kb,
+                reply_markup=None,
                 parse_mode="HTML",
                 disable_web_page_preview=True,
             )
@@ -48,20 +49,13 @@ async def render(
         except TelegramBadRequest as e:
             low = str(e).lower()
             if "not modified" in low:
-                # Текст идентичен — попробуем хотя бы обновить клавиатуру.
-                try:
-                    await bot.edit_message_reply_markup(
-                        chat_id=chat_id, message_id=card_id, reply_markup=kb,
-                    )
-                except TelegramBadRequest:
-                    pass
                 return card_id
             logger.info("Card %d unusable (%s), recreating", card_id, e)
 
     sent = await bot.send_message(
         chat_id,
         text,
-        reply_markup=kb,
+        reply_markup=None,
         parse_mode="HTML",
         disable_web_page_preview=True,
     )
@@ -87,15 +81,43 @@ async def safe_delete(bot: Bot, chat_id: int, message_id: int) -> None:
         pass
 
 
-async def clear_reply_keyboard(bot: Bot, chat_id: int, state: FSMContext) -> None:
-    """Снимает залипший reply-keyboard от старой версии бота. Запускается один раз
-    на пользователя; результат запоминается в FSM, чтобы не плодить шум."""
+async def set_reply_kb(
+    bot: Bot, chat_id: int, state: FSMContext, kb: ReplyKeyboardMarkup,
+) -> None:
+    """Устанавливает reply-клавиатуру у поля ввода.
+
+    edit_message_text не умеет менять reply-клавиатуру (она привязана к чату,
+    а не к сообщению), поэтому шлём transient-сообщение с нужной клавиатурой
+    и тут же удаляем — сама клавиатура остаётся, пока не сменится новой
+    или ReplyKeyboardRemove.
+    """
+    try:
+        m = await bot.send_message(chat_id, "⁣", reply_markup=kb)
+        await safe_delete(bot, chat_id, m.message_id)
+    except (TelegramBadRequest, TelegramForbiddenError):
+        pass
+    await state.update_data(reply_kb_active=True)
+
+
+async def remove_reply_kb(bot: Bot, chat_id: int, state: FSMContext) -> None:
+    """Снимает reply-клавиатуру, если она установлена ботом.
+
+    Идемпотентна: если флаг `reply_kb_active` уже выставлен False (или его нет
+    при первом запуске), ничего не отправляет — избегаем лишнего флика
+    transient-сообщения при каждом /start.
+    """
     data = await state.get_data()
-    if data.get("reply_kb_cleared"):
+    if not data.get("reply_kb_active") and data.get("reply_kb_cleared"):
         return
     try:
         m = await bot.send_message(chat_id, "⁣", reply_markup=ReplyKeyboardRemove())
         await safe_delete(bot, chat_id, m.message_id)
     except (TelegramBadRequest, TelegramForbiddenError):
         pass
-    await state.update_data(reply_kb_cleared=True)
+    await state.update_data(reply_kb_active=False, reply_kb_cleared=True)
+
+
+# Алиас для обратной совместимости: старый код звал clear_reply_keyboard для
+# одноразовой очистки залипшей клавиатуры от старой версии бота. Теперь это
+# просто отдельный путь через remove_reply_kb.
+clear_reply_keyboard = remove_reply_kb

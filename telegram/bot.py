@@ -3,8 +3,6 @@
 """
 import asyncio
 import logging
-import os
-import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -30,7 +28,7 @@ async def main() -> None:
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
     dp = Dispatcher(storage=MemoryStorage())
 
-    # Порядок важен: admin и training раньше dialog,
+    # Порядок важен admin и training раньше dialog,
     # чтобы команды /wl_* и callback'и не проваливались в fallback
     dp.include_router(admin_router)
     dp.include_router(menu_router)
@@ -62,37 +60,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
-# async def main() -> None:
-#     logger = logging.getLogger(__name__)
-#
-#     bot = Bot(
-#         token=BOT_TOKEN,
-#         default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-#     )
-#
-#     dp = Dispatcher(storage=MemoryStorage())
-#
-#     dp.include_router(admin_router)
-#     dp.include_router(menu_router)
-#     dp.include_router(training_router)
-#     dp.include_router(dialog_router)
-#
-#     await set_bot_commands(bot)
-#
-#     try:
-#         await bot.delete_webhook(drop_pending_updates=True)
-#         logger.info("Webhook deleted successfully.")
-#
-#         logger.info("Starting polling...")
-#
-#         await dp.start_polling(
-#             bot,
-#             allowed_updates=["message", "callback_query"]
-#         )
-#
-#     except Exception:
-#         logger.exception("Bot crashed")
-#
-#     finally:
-#         await bot.session.close()
