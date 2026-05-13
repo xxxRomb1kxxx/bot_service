@@ -337,36 +337,61 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
 
     await state.set_state(None)
     await state.update_data(session_id=None, diagnosis=diagnosis, report=report or {})
+    # Всегда показываем полный набор вкладок: даже если отчёт не пришёл,
+    # пользователь должен иметь возможность открыть «Атрибуты/Язык/Итог».
     await card.send(
         msg.bot, msg.chat.id,
         views.diagnosis_result_card(diagnosis),
-        reply_kb=report_kb(include_diagnosis=True) if report else diagnosis_result_kb(),
+        reply_kb=report_kb(include_diagnosis=True),
     )
 
 
 async def _fetch_report_after_diagnosis(session_id: str, tg_id: int) -> Optional[dict]:
     """Подтягивает полный отчёт после успешной отправки диагноза.
 
-    Если бэкенд уже считает сессию завершённой (404/409) или временно недоступен,
-    возвращаем None — пользователь увидит только результат по диагнозу.
+    Контрольный режим закрывает сессию после `submit_diagnosis`, поэтому
+    `finish_consultation` обычно отвечает 404/409. В этом случае пробуем
+    забрать данные из `get_session_status` — он не закрывает сессию и может
+    отдать накопленные атрибуты/оценку языка.
     """
     try:
         return await api.finish_consultation(session_id, tg_id)
     except api.BackendError as e:
-        if e.status in (404, 409, 502, 503, 504):
-            logger.info("Report unavailable after diagnosis (%s): %s", e.status, e.detail)
-            return None
-        raise
+        if e.status not in (404, 409, 502, 503, 504):
+            raise
+        logger.info(
+            "finish_consultation after diagnosis failed (%s) — fallback to status",
+            e.status,
+        )
+    try:
+        return await api.get_session_status(session_id, tg_id)
+    except api.BackendError as e:
+        logger.info("get_session_status fallback failed (%s): %s", e.status, e.detail)
+        return None
 
 
 # ── Вкладки отчёта (state=None, reply-клавиатура persistент) ──────────────────
 # Reply-клавиатура отчёта уже установлена при первом показе, и сохраняется на
 # чат-уровне, поэтому здесь только шлём новое сообщение с содержимым вкладки.
 
-async def _send_report_tab(msg: Message, state: FSMContext, renderer) -> None:
+async def _send_report_tab(
+    msg: Message,
+    state: FSMContext,
+    renderer,
+    *,
+    requires_key: Optional[str] = None,
+) -> None:
+    """Шлёт содержимое вкладки. Если `requires_key` задан и его нет в отчёте —
+    показываем сообщение «данные недоступны» вместо пустой карточки."""
     await _delete_button_press(msg)
     data = await state.get_data()
     result = data.get("report") or {}
+    if requires_key and not result.get(requires_key):
+        await card.send(
+            msg.bot, msg.chat.id,
+            views.status_card("Эти данные недоступны после диагноза."),
+        )
+        return
     await card.send(msg.bot, msg.chat.id, renderer(result))
 
 
@@ -380,12 +405,16 @@ async def on_btn_tab_diagnosis(msg: Message, state: FSMContext) -> None:
 
 @router.message(StateFilter(None), F.text == BTN_TAB_ATTRIBUTES)
 async def on_btn_tab_attributes(msg: Message, state: FSMContext) -> None:
-    await _send_report_tab(msg, state, views.report_attributes_card)
+    await _send_report_tab(
+        msg, state, views.report_attributes_card, requires_key="attributes",
+    )
 
 
 @router.message(StateFilter(None), F.text == BTN_TAB_LANGUAGE)
 async def on_btn_tab_language(msg: Message, state: FSMContext) -> None:
-    await _send_report_tab(msg, state, views.report_language_card)
+    await _send_report_tab(
+        msg, state, views.report_language_card, requires_key="language_quality",
+    )
 
 
 @router.message(StateFilter(None), F.text == BTN_TAB_SUMMARY)
