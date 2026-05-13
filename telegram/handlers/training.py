@@ -59,8 +59,9 @@ async def _start_random_case_with_retry(tg_id: int, mode: str = "control") -> di
 
 
 async def _show_disease_select(msg: Message, state: FSMContext) -> None:
-    await card.render(msg.bot, msg.chat.id, state, views.DISEASE_SELECT)
-    await card.set_reply_kb(msg.bot, msg.chat.id, state, disease_kb())
+    await card.render(
+        msg.bot, msg.chat.id, state, views.DISEASE_SELECT, reply_kb=disease_kb(),
+    )
 
 
 async def _show_mode_select(msg: Message, state: FSMContext) -> None:
@@ -103,8 +104,9 @@ async def _enter_dialog(
         last_reply=greeting,
         q_count=0,
     )
-    await card.render(msg.bot, msg.chat.id, state, text)
-    await card.set_reply_kb(msg.bot, msg.chat.id, state, dialog_reply_kb(mode))
+    await card.render(
+        msg.bot, msg.chat.id, state, text, reply_kb=dialog_reply_kb(mode),
+    )
 
 
 # ── Выбор режима ──────────────────────────────────────────────────────────────
@@ -133,8 +135,10 @@ async def on_btn_disease(msg: Message, state: FSMContext) -> None:
         await api.ensure_whitelisted(tg_id)
         case = await _start_case_with_retry(tg_id, disease_type=disease_code, mode="training")
     except api.BackendError as e:
-        await card.render(msg.bot, msg.chat.id, state, views.error_card(str(e.detail)))
-        await card.set_reply_kb(msg.bot, msg.chat.id, state, back_to_menu_kb())
+        await card.render(
+            msg.bot, msg.chat.id, state, views.error_card(str(e.detail)),
+            reply_kb=back_to_menu_kb(),
+        )
         return
 
     await _enter_dialog(msg, state, case=case, mode="training")
@@ -152,8 +156,10 @@ async def on_btn_mode_control(msg: Message, state: FSMContext) -> None:
         await api.ensure_whitelisted(tg_id)
         case = await _start_random_case_with_retry(tg_id, mode="control")
     except api.BackendError as e:
-        await card.render(msg.bot, msg.chat.id, state, views.error_card(str(e.detail)))
-        await card.set_reply_kb(msg.bot, msg.chat.id, state, back_to_menu_kb())
+        await card.render(
+            msg.bot, msg.chat.id, state, views.error_card(str(e.detail)),
+            reply_kb=back_to_menu_kb(),
+        )
         return
 
     await _enter_dialog(msg, state, case=case, mode="control")

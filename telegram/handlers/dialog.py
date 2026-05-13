@@ -80,7 +80,11 @@ async def _render_diagnosis_prompt(
 
 
 async def _abort_session(bot, chat_id: int, state: FSMContext) -> None:
-    """Снимает активную сессию на бэкенде, чистит FSM, убирает reply-клавиатуру."""
+    """Снимает активную сессию на бэкенде и чистит FSM.
+
+    Reply-клавиатуру не снимаем явно: следующий рендер карточки (главное меню
+    или экран ошибки) пересоздаст карточку и переустановит нужную клавиатуру.
+    """
     data = await state.get_data()
     session_id = data.get("session_id")
     tg_id = data.get("tg_id")
@@ -90,14 +94,12 @@ async def _abort_session(bot, chat_id: int, state: FSMContext) -> None:
         except Exception as e:
             logger.warning("delete_session failed: %s", e)
     card_id = data.get("card_id")
-    reply_cleared = data.get("reply_kb_cleared", False)
     await state.set_state(None)
     await state.set_data({
         "card_id": card_id,
-        "reply_kb_cleared": reply_cleared,
         "reply_kb_active": data.get("reply_kb_active", False),
+        "reply_kb_cleared": data.get("reply_kb_cleared", False),
     })
-    await card.remove_reply_kb(bot, chat_id, state)
 
 
 # ── Reply-кнопки: завершение / прерывание / переход к диагнозу ────────────────
@@ -115,8 +117,8 @@ async def on_btn_finish(msg: Message, state: FSMContext) -> None:
         await card.render(
             msg.bot, msg.chat.id, state,
             views.error_card("Сессия потеряна."),
+            reply_kb=back_to_menu_kb(),
         )
-        await card.set_reply_kb(msg.bot, msg.chat.id, state, back_to_menu_kb())
         return
 
     await _render_dialog(state, msg.bot, msg.chat.id, status="Анализирую консультацию…")
@@ -125,12 +127,12 @@ async def on_btn_finish(msg: Message, state: FSMContext) -> None:
         result = await api.finish_consultation(session_id, tg_id)
     except api.BackendError as e:
         if e.status in (404, 409):
+            await _abort_session(msg.bot, msg.chat.id, state)
             await card.render(
                 msg.bot, msg.chat.id, state,
                 views.error_card("Сессия уже завершена."),
+                reply_kb=back_to_menu_kb(),
             )
-            await _abort_session(msg.bot, msg.chat.id, state)
-            await card.set_reply_kb(msg.bot, msg.chat.id, state, back_to_menu_kb())
             return
         if e.status in (502, 504):
             await _render_dialog(
@@ -148,8 +150,11 @@ async def on_btn_finish(msg: Message, state: FSMContext) -> None:
     # Переход в отчёт: вместо inline-вкладок используем reply-клавиатуру у поля ввода.
     await state.set_state(None)
     await state.update_data(report=result, session_id=None)
-    await card.render(msg.bot, msg.chat.id, state, views.report_attributes_card(result))
-    await card.set_reply_kb(msg.bot, msg.chat.id, state, report_kb())
+    await card.render(
+        msg.bot, msg.chat.id, state,
+        views.report_attributes_card(result),
+        reply_kb=report_kb(),
+    )
 
 
 @router.message(DialogState.waiting_question, F.text == BTN_DIAGNOSIS)
@@ -157,8 +162,14 @@ async def on_btn_diagnosis(msg: Message, state: FSMContext) -> None:
     """Контрольный режим: переход к вводу диагноза."""
     await _delete_user_msg(msg)
     await state.set_state(DialogState.waiting_diagnosis)
-    await _render_diagnosis_prompt(state, msg.bot, msg.chat.id)
-    await card.set_reply_kb(msg.bot, msg.chat.id, state, diagnosis_reply_kb())
+    data = await state.get_data()
+    text = views.diagnosis_prompt_card(
+        patient=data.get("patient") or {},
+        q_count=int(data.get("q_count", 0) or 0),
+    )
+    await card.render(
+        msg.bot, msg.chat.id, state, text, reply_kb=diagnosis_reply_kb(),
+    )
 
 
 @router.message(DialogState.waiting_diagnosis, F.text == BTN_CANCEL_DIAGNOSIS)
@@ -166,10 +177,18 @@ async def on_btn_cancel_diagnosis(msg: Message, state: FSMContext) -> None:
     """Из ввода диагноза обратно в диалог."""
     await _delete_user_msg(msg)
     await state.set_state(DialogState.waiting_question)
-    await _render_dialog(state, msg.bot, msg.chat.id)
     data = await state.get_data()
-    await card.set_reply_kb(
-        msg.bot, msg.chat.id, state, dialog_reply_kb(data.get("mode", "control")),
+    text = views.dialog_card(
+        mode=data.get("mode", "training"),
+        disease_name=data.get("disease_name", "?"),
+        patient=data.get("patient") or {},
+        last_question=data.get("last_question"),
+        last_reply=data.get("last_reply"),
+        q_count=int(data.get("q_count", 0) or 0),
+    )
+    await card.render(
+        msg.bot, msg.chat.id, state, text,
+        reply_kb=dialog_reply_kb(data.get("mode", "control")),
     )
 
 
@@ -200,12 +219,12 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
     session_id = data.get("session_id")
     tg_id = data.get("tg_id") or user_id
     if not session_id or not tg_id:
+        await state.set_state(None)
         await card.render(
             msg.bot, msg.chat.id, state,
             views.error_card("Сессия потеряна. Начните новый кейс."),
+            reply_kb=back_to_menu_kb(),
         )
-        await state.set_state(None)
-        await card.set_reply_kb(msg.bot, msg.chat.id, state, back_to_menu_kb())
         return
 
     # Сразу показываем «обдумывает» с текущим вопросом, чтобы пользователь видел
@@ -232,12 +251,12 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
 
 async def _handle_send_error(state, bot, chat_id, e: api.BackendError, user_id) -> None:
     if e.status in (404, 409):
+        await _abort_session(bot, chat_id, state)
         await card.render(
             bot, chat_id, state,
             views.error_card("Сессия уже завершена или не найдена."),
+            reply_kb=back_to_menu_kb(),
         )
-        await _abort_session(bot, chat_id, state)
-        await card.set_reply_kb(bot, chat_id, state, back_to_menu_kb())
         return
     if e.status == 422:
         detail = e.detail
@@ -333,12 +352,12 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
     session_id = data.get("session_id")
     tg_id = data.get("tg_id") or user_id
     if not session_id or not tg_id:
+        await state.set_state(None)
         await card.render(
             msg.bot, msg.chat.id, state,
             views.error_card("Сессия потеряна."),
+            reply_kb=back_to_menu_kb(),
         )
-        await state.set_state(None)
-        await card.set_reply_kb(msg.bot, msg.chat.id, state, back_to_menu_kb())
         return
 
     await _render_diagnosis_prompt(
@@ -363,19 +382,22 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
             )
             return
         logger.warning("submit_diagnosis error: %s %s", e.status, e.detail)
+        await _abort_session(msg.bot, msg.chat.id, state)
         await card.render(
             msg.bot, msg.chat.id, state,
             views.error_card("Не удалось отправить диагноз."),
+            reply_kb=back_to_menu_kb(),
         )
-        await _abort_session(msg.bot, msg.chat.id, state)
-        await card.set_reply_kb(msg.bot, msg.chat.id, state, back_to_menu_kb())
         return
 
     # Готово: переход в карточку результата с reply-кнопкой «Готово».
     await state.set_state(None)
     await state.update_data(session_id=None, report=result)
-    await card.render(msg.bot, msg.chat.id, state, views.diagnosis_result_card(result))
-    await card.set_reply_kb(msg.bot, msg.chat.id, state, diagnosis_result_kb())
+    await card.render(
+        msg.bot, msg.chat.id, state,
+        views.diagnosis_result_card(result),
+        reply_kb=diagnosis_result_kb(),
+    )
 
 
 # ── Вкладки отчёта (state=None, reply-клавиатура) ─────────────────────────────
@@ -439,8 +461,8 @@ async def cmd_diagnosis(msg: Message, state: FSMContext) -> None:
         await card.render(
             msg.bot, msg.chat.id, state,
             views.error_card("Сначала начните кейс через главное меню."),
+            reply_kb=back_to_menu_kb(),
         )
-        await card.set_reply_kb(msg.bot, msg.chat.id, state, back_to_menu_kb())
         return
     if data.get("mode") == "training":
         await _render_dialog(
@@ -449,8 +471,13 @@ async def cmd_diagnosis(msg: Message, state: FSMContext) -> None:
         )
         return
     await state.set_state(DialogState.waiting_diagnosis)
-    await _render_diagnosis_prompt(state, msg.bot, msg.chat.id)
-    await card.set_reply_kb(msg.bot, msg.chat.id, state, diagnosis_reply_kb())
+    text = views.diagnosis_prompt_card(
+        patient=data.get("patient") or {},
+        q_count=int(data.get("q_count", 0) or 0),
+    )
+    await card.render(
+        msg.bot, msg.chat.id, state, text, reply_kb=diagnosis_reply_kb(),
+    )
 
 
 # ── Фолбэк: любой текст вне состояний удаляется, карточка не меняется ─────────
