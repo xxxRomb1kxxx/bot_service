@@ -83,6 +83,27 @@ def _truncate(text: str, limit: int = 600) -> str:
     return text[: limit - 1].rstrip() + "…"
 
 
+def dialog_intro_card(*, mode: str, disease_name: str, patient: dict, greeting: str) -> str:
+    """Стартовое сообщение диалога: режим, инфо о пациенте и его приветствие."""
+    return (
+        f"<b>🩺 {escape(_mode_label(mode))} — {escape(disease_name)}</b>\n"
+        f"{HR}\n"
+        f"<i>{escape(patient_header(patient))}</i>\n\n"
+        f"<b>👤 Пациент:</b>\n{escape(_truncate(greeting, 1800))}\n\n"
+        f"<i>Опрашивайте пациента — пишите вопросы в чат.</i>"
+    )
+
+
+def patient_reply_card(reply: str) -> str:
+    """Очередной ответ пациента — короткое сообщение в стиле обычного чата."""
+    return f"<b>👤 Пациент:</b>\n{escape(_truncate(reply, 1800))}"
+
+
+def status_card(text: str) -> str:
+    """Короткое статус- или ошибочное сообщение."""
+    return f"⚠️ <i>{escape(text)}</i>"
+
+
 def dialog_card(
     *,
     mode: str,

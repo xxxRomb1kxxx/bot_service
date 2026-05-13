@@ -1,6 +1,6 @@
 """
-Старт кейса (тренировка / контрольный) — переход к экрану диалога.
-Все шаги рендерятся в одну карточку, управление — в reply-клавиатуре.
+Старт кейса (тренировка / контрольный) — переход в диалог с пациентом.
+Бот общается обычными сообщениями, кнопки управления — в reply-клавиатуре.
 """
 import logging
 
@@ -59,9 +59,7 @@ async def _start_random_case_with_retry(tg_id: int, mode: str = "control") -> di
 
 
 async def _show_disease_select(msg: Message, state: FSMContext) -> None:
-    await card.render(
-        msg.bot, msg.chat.id, state, views.DISEASE_SELECT, reply_kb=disease_kb(),
-    )
+    await card.send(msg.bot, msg.chat.id, views.DISEASE_SELECT, reply_kb=disease_kb())
 
 
 async def _show_mode_select(msg: Message, state: FSMContext) -> None:
@@ -78,7 +76,7 @@ async def _enter_dialog(
     case: dict,
     mode: str,
 ) -> None:
-    """Сохраняет данные сессии в FSM и рендерит карточку диалога."""
+    """Сохраняет данные сессии в FSM и шлёт стартовое сообщение диалога."""
     tg_id = msg.from_user.id
     patient = case.get("patient") or {}
     disease_name = case.get("disease_type") or "?"
@@ -91,22 +89,13 @@ async def _enter_dialog(
         disease_name=disease_name,
         patient=patient,
         q_count=0,
-        last_question=None,
-        last_reply=greeting,
     )
     await state.set_state(DialogState.waiting_question)
 
-    text = views.dialog_card(
-        mode=mode,
-        disease_name=disease_name,
-        patient=patient,
-        last_question=None,
-        last_reply=greeting,
-        q_count=0,
+    text = views.dialog_intro_card(
+        mode=mode, disease_name=disease_name, patient=patient, greeting=greeting,
     )
-    await card.render(
-        msg.bot, msg.chat.id, state, text, reply_kb=dialog_reply_kb(mode),
-    )
+    await card.send(msg.bot, msg.chat.id, text, reply_kb=dialog_reply_kb(mode))
 
 
 # ── Выбор режима ──────────────────────────────────────────────────────────────
@@ -135,8 +124,8 @@ async def on_btn_disease(msg: Message, state: FSMContext) -> None:
         await api.ensure_whitelisted(tg_id)
         case = await _start_case_with_retry(tg_id, disease_type=disease_code, mode="training")
     except api.BackendError as e:
-        await card.render(
-            msg.bot, msg.chat.id, state, views.error_card(str(e.detail)),
+        await card.send(
+            msg.bot, msg.chat.id, views.error_card(str(e.detail)),
             reply_kb=back_to_menu_kb(),
         )
         return
@@ -156,8 +145,8 @@ async def on_btn_mode_control(msg: Message, state: FSMContext) -> None:
         await api.ensure_whitelisted(tg_id)
         case = await _start_random_case_with_retry(tg_id, mode="control")
     except api.BackendError as e:
-        await card.render(
-            msg.bot, msg.chat.id, state, views.error_card(str(e.detail)),
+        await card.send(
+            msg.bot, msg.chat.id, views.error_card(str(e.detail)),
             reply_kb=back_to_menu_kb(),
         )
         return

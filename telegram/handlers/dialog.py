@@ -1,10 +1,9 @@
 """
-Диалог с пациентом, ввод диагноза и финальный отчёт.
+Диалог с пациентом, ввод диагноза и финальный отчёт — в обычном чате.
 
-Карточка показывает текст беседы и обновляется по ходу. Сообщения пользователя
-(вопросы пациенту, ввод диагноза, команды) в чате не трогаем — пусть остаются,
-как в обычной переписке. Удаляем только нажатия reply-кнопок (текстовые метки
-вроде «✅ Завершить и получить отчёт»), чтобы не было дубликатов.
+Каждый ответ бота — новое сообщение. Сообщения пользователя не удаляются
+(кроме нажатий reply-кнопок, чтобы не было дубликатов одинаковых меток).
+Reply-клавиатура у поля ввода переключается по мере смены экранов.
 """
 import asyncio
 import logging
@@ -14,6 +13,7 @@ from aiogram import F, Router
 from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
+from aiogram.utils.chat_action import ChatActionSender
 
 from dialog_engine.dialog_states import DialogState
 from telegram import api_client as api
@@ -37,7 +37,6 @@ from telegram.ui import card, views
 router = Router(name="dialog")
 logger = logging.getLogger(__name__)
 
-# Polling: окно ожидания ответа пациента в асинхронном режиме API.
 POLL_INTERVAL_SEC = 0.5
 POLL_TIMEOUT_SEC = 75
 POLL_MAX_ATTEMPTS = int(POLL_TIMEOUT_SEC / POLL_INTERVAL_SEC)
@@ -46,48 +45,13 @@ POLL_MAX_ATTEMPTS = int(POLL_TIMEOUT_SEC / POLL_INTERVAL_SEC)
 # ── Утилиты ───────────────────────────────────────────────────────────────────
 
 async def _delete_button_press(msg: Message) -> None:
-    """Удаляет нажатие reply-кнопки — текст-метка кнопки повторяется при каждом
-    нажатии и захламляет чат, поэтому стираем его сразу."""
+    """Удаляет нажатие reply-кнопки — её текст-метка повторяется при каждом
+    нажатии и захламляет чат."""
     await card.safe_delete(msg.bot, msg.chat.id, msg.message_id)
 
 
-async def _render_dialog(state: FSMContext, bot, chat_id: int, *, status: Optional[str] = None) -> None:
-    """Рендер карточки диалога — без inline-кнопок, управление в reply-клавиатуре."""
-    data = await state.get_data()
-    text = views.dialog_card(
-        mode=data.get("mode", "training"),
-        disease_name=data.get("disease_name", "?"),
-        patient=data.get("patient") or {},
-        last_question=data.get("last_question"),
-        last_reply=data.get("last_reply"),
-        q_count=int(data.get("q_count", 0) or 0),
-        status=status,
-    )
-
-    await card.render(bot, chat_id, state, text)
-
-
-async def _render_diagnosis_prompt(
-    state: FSMContext, bot, chat_id: int, *, suffix: Optional[str] = None,
-) -> None:
-    """Рендер карточки ввода диагноза. Suffix добавляет ниже подсказки строку
-    (например, статус «Проверяю…» или текст ошибки)."""
-    data = await state.get_data()
-    text = views.diagnosis_prompt_card(
-        patient=data.get("patient") or {},
-        q_count=int(data.get("q_count", 0) or 0),
-    )
-    if suffix:
-        text = f"{text}\n\n{suffix}"
-    await card.render(bot, chat_id, state, text)
-
-
 async def _abort_session(bot, chat_id: int, state: FSMContext) -> None:
-    """Снимает активную сессию на бэкенде и чистит FSM.
-
-    Reply-клавиатуру не снимаем явно: следующий рендер карточки (главное меню
-    или экран ошибки) пересоздаст карточку и переустановит нужную клавиатуру.
-    """
+    """Снимает активную сессию на бэкенде и чистит FSM."""
     data = await state.get_data()
     session_id = data.get("session_id")
     tg_id = data.get("tg_id")
@@ -96,18 +60,11 @@ async def _abort_session(bot, chat_id: int, state: FSMContext) -> None:
             await api.delete_session(session_id, tg_id)
         except Exception as e:
             logger.warning("delete_session failed: %s", e)
-    card_id = data.get("card_id")
     await state.set_state(None)
-    await state.set_data({
-        "card_id": card_id,
-        "reply_kb_active": data.get("reply_kb_active", False),
-        "reply_kb_cleared": data.get("reply_kb_cleared", False),
-    })
+    await state.set_data({})
 
 
 # ── Reply-кнопки: завершение / прерывание / переход к диагнозу ────────────────
-# Эти хендлеры регистрируются ДО общего handle_dialog, иначе текст кнопки уйдёт
-# пациенту как вопрос.
 
 @router.message(DialogState.waiting_question, F.text == BTN_FINISH)
 async def on_btn_finish(msg: Message, state: FSMContext) -> None:
@@ -117,44 +74,42 @@ async def on_btn_finish(msg: Message, state: FSMContext) -> None:
     session_id = data.get("session_id")
     tg_id = data.get("tg_id")
     if not session_id or not tg_id:
-        await card.render(
-            msg.bot, msg.chat.id, state,
+        await card.send(
+            msg.bot, msg.chat.id,
             views.error_card("Сессия потеряна."),
             reply_kb=back_to_menu_kb(),
         )
         return
 
-    await _render_dialog(state, msg.bot, msg.chat.id, status="Анализирую консультацию…")
-
     try:
-        result = await api.finish_consultation(session_id, tg_id)
+        async with ChatActionSender.typing(bot=msg.bot, chat_id=msg.chat.id):
+            result = await api.finish_consultation(session_id, tg_id)
     except api.BackendError as e:
         if e.status in (404, 409):
             await _abort_session(msg.bot, msg.chat.id, state)
-            await card.render(
-                msg.bot, msg.chat.id, state,
+            await card.send(
+                msg.bot, msg.chat.id,
                 views.error_card("Сессия уже завершена."),
                 reply_kb=back_to_menu_kb(),
             )
             return
         if e.status in (502, 504):
-            await _render_dialog(
-                state, msg.bot, msg.chat.id,
-                status="Сервер не успел подготовить отчёт. Подождите минуту и нажмите ещё раз.",
+            await card.send(
+                msg.bot, msg.chat.id,
+                views.status_card("Сервер не успел подготовить отчёт. Подождите минуту и нажмите ещё раз."),
             )
             return
         logger.warning("finish-consultation error: %s %s", e.status, e.detail)
-        await _render_dialog(
-            state, msg.bot, msg.chat.id,
-            status="Произошла ошибка. Попробуйте ещё раз.",
+        await card.send(
+            msg.bot, msg.chat.id,
+            views.status_card("Произошла ошибка. Попробуйте ещё раз."),
         )
         return
 
-    # Переход в отчёт: вместо inline-вкладок используем reply-клавиатуру у поля ввода.
     await state.set_state(None)
     await state.update_data(report=result, session_id=None)
-    await card.render(
-        msg.bot, msg.chat.id, state,
+    await card.send(
+        msg.bot, msg.chat.id,
         views.report_attributes_card(result),
         reply_kb=report_kb(),
     )
@@ -170,27 +125,18 @@ async def on_btn_diagnosis(msg: Message, state: FSMContext) -> None:
         patient=data.get("patient") or {},
         q_count=int(data.get("q_count", 0) or 0),
     )
-    await card.render(
-        msg.bot, msg.chat.id, state, text, reply_kb=diagnosis_reply_kb(),
-    )
+    await card.send(msg.bot, msg.chat.id, text, reply_kb=diagnosis_reply_kb())
 
 
 @router.message(DialogState.waiting_diagnosis, F.text == BTN_CANCEL_DIAGNOSIS)
 async def on_btn_cancel_diagnosis(msg: Message, state: FSMContext) -> None:
-    """Из ввода диагноза обратно в диалог."""
+    """Из ввода диагноза обратно к опросу пациента."""
     await _delete_button_press(msg)
     await state.set_state(DialogState.waiting_question)
     data = await state.get_data()
-    text = views.dialog_card(
-        mode=data.get("mode", "training"),
-        disease_name=data.get("disease_name", "?"),
-        patient=data.get("patient") or {},
-        last_question=data.get("last_question"),
-        last_reply=data.get("last_reply"),
-        q_count=int(data.get("q_count", 0) or 0),
-    )
-    await card.render(
-        msg.bot, msg.chat.id, state, text,
+    await card.send(
+        msg.bot, msg.chat.id,
+        "<i>Возвращаемся к диалогу. Задавайте вопросы пациенту.</i>",
         reply_kb=dialog_reply_kb(data.get("mode", "control")),
     )
 
@@ -212,50 +158,44 @@ async def on_btn_abort(msg: Message, state: FSMContext) -> None:
 async def handle_dialog(msg: Message, state: FSMContext) -> None:
     user_id = msg.from_user.id if msg.from_user else None
     text = (msg.text or "").strip()
-    logger.info("Dialog message: user_id=%s, text=%r", user_id, text[:100])
-
     if not text:
         return
+    logger.info("Dialog message: user_id=%s, text=%r", user_id, text[:100])
 
     data = await state.get_data()
     session_id = data.get("session_id")
     tg_id = data.get("tg_id") or user_id
     if not session_id or not tg_id:
         await state.set_state(None)
-        await card.render(
-            msg.bot, msg.chat.id, state,
+        await card.send(
+            msg.bot, msg.chat.id,
             views.error_card("Сессия потеряна. Начните новый кейс."),
             reply_kb=back_to_menu_kb(),
         )
         return
 
-    # Сразу показываем «обдумывает» с текущим вопросом, чтобы пользователь видел
-    # прогресс и не нервничал во время LLM-вызова.
-    await state.update_data(last_question=text)
-    await _render_dialog(state, msg.bot, msg.chat.id, status="Пациент обдумывает ответ…")
-
     try:
-        queued = await api.send_message(session_id, text, tg_id)
+        async with ChatActionSender.typing(bot=msg.bot, chat_id=msg.chat.id):
+            queued = await api.send_message(session_id, text, tg_id)
+            reply = await _resolve_reply(queued, session_id, tg_id, msg.bot, msg.chat.id)
     except api.BackendError as e:
-        await _handle_send_error(state, msg.bot, msg.chat.id, e, user_id)
+        await _handle_send_error(msg.bot, msg.chat.id, state, e, user_id)
         return
 
-    reply = await _resolve_reply(queued, session_id, tg_id, state, msg.bot, msg.chat.id)
     if reply is None:
-        return  # _resolve_reply сам рендерит ошибку
+        return  # _resolve_reply сам отправил ошибку
 
     await state.update_data(
-        last_reply=str(reply),
         q_count=int(data.get("q_count", 0) or 0) + 1,
     )
-    await _render_dialog(state, msg.bot, msg.chat.id)
+    await card.send(msg.bot, msg.chat.id, views.patient_reply_card(reply))
 
 
-async def _handle_send_error(state, bot, chat_id, e: api.BackendError, user_id) -> None:
+async def _handle_send_error(bot, chat_id, state, e: api.BackendError, user_id) -> None:
     if e.status in (404, 409):
         await _abort_session(bot, chat_id, state)
-        await card.render(
-            bot, chat_id, state,
+        await card.send(
+            bot, chat_id,
             views.error_card("Сессия уже завершена или не найдена."),
             reply_kb=back_to_menu_kb(),
         )
@@ -265,20 +205,22 @@ async def _handle_send_error(state, bot, chat_id, e: api.BackendError, user_id) 
         msg_text = (
             detail.get("message") if isinstance(detail, dict) else None
         ) or "Пожалуйста, задавайте вопросы в рамках медицинского осмотра."
-        await _render_dialog(state, bot, chat_id, status=f"⚠️ {msg_text}")
+        await card.send(bot, chat_id, views.status_card(msg_text))
         return
     if e.status in (502, 503, 504):
         logger.warning("Transient backend error %s for user %s: %s", e.status, user_id, e.detail)
-        await _render_dialog(
-            state, bot, chat_id,
-            status="Сервер сейчас перегружен — повторите вопрос через минуту.",
+        await card.send(
+            bot, chat_id,
+            views.status_card("Сервер сейчас перегружен — повторите вопрос через минуту."),
         )
         return
     logger.warning("Backend error %s for user %s: %s", e.status, user_id, e.detail)
-    await _render_dialog(state, bot, chat_id, status="Произошла ошибка. Попробуйте повторить вопрос.")
+    await card.send(bot, chat_id, views.status_card("Произошла ошибка. Попробуйте повторить вопрос."))
 
 
-async def _resolve_reply(queued: dict, session_id, tg_id, state, bot, chat_id) -> Optional[str]:
+async def _resolve_reply(
+    queued: dict, session_id, tg_id, bot, chat_id,
+) -> Optional[str]:
     """Достаёт ответ пациента: либо сразу из POST /message (синхронный режим),
     либо через polling GET /messages/{id}, либо через fallback /status."""
     sync_reply = (
@@ -292,12 +234,12 @@ async def _resolve_reply(queued: dict, session_id, tg_id, state, bot, chat_id) -
     message_id = queued.get("message_id")
     if not message_id:
         logger.warning("send_message returned neither reply nor message_id: %r", queued)
-        await _render_dialog(state, bot, chat_id, status="Произошла ошибка. Попробуйте повторить.")
+        await card.send(bot, chat_id, views.status_card("Произошла ошибка. Попробуйте повторить."))
         return None
 
     reply = None
     task_seen = False
-    for attempt in range(POLL_MAX_ATTEMPTS):
+    for _ in range(POLL_MAX_ATTEMPTS):
         try:
             data = await api.get_message_result(session_id, message_id, tg_id)
             task_seen = True
@@ -311,12 +253,12 @@ async def _resolve_reply(queued: dict, session_id, tg_id, state, bot, chat_id) -
                 await asyncio.sleep(POLL_INTERVAL_SEC)
                 continue
             logger.warning("Poll error %s: %s", e.status, e.detail)
-            await _render_dialog(state, bot, chat_id, status="Произошла ошибка. Попробуйте повторить.")
+            await card.send(bot, chat_id, views.status_card("Произошла ошибка. Попробуйте повторить."))
             return None
 
         if data.get("status") == "error":
             err = data.get("error") or "Не удалось обработать запрос"
-            await _render_dialog(state, bot, chat_id, status=f"⚠️ {err}")
+            await card.send(bot, chat_id, views.status_card(err))
             return None
         if data.get("reply") is not None:
             reply = data["reply"]
@@ -335,7 +277,10 @@ async def _resolve_reply(queued: dict, session_id, tg_id, state, bot, chat_id) -
             logger.warning("Session status fallback error: %s %s", e.status, e.detail)
 
     if reply is None:
-        await _render_dialog(state, bot, chat_id, status="Пациент не ответил вовремя. Попробуйте ещё раз.")
+        await card.send(
+            bot, chat_id,
+            views.status_card("Пациент не ответил вовремя. Попробуйте ещё раз."),
+        )
         return None
     return str(reply)
 
@@ -354,90 +299,81 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
     tg_id = data.get("tg_id") or user_id
     if not session_id or not tg_id:
         await state.set_state(None)
-        await card.render(
-            msg.bot, msg.chat.id, state,
+        await card.send(
+            msg.bot, msg.chat.id,
             views.error_card("Сессия потеряна."),
             reply_kb=back_to_menu_kb(),
         )
         return
 
-    await _render_diagnosis_prompt(
-        state, msg.bot, msg.chat.id, suffix="⏳ <i>Проверяю диагноз…</i>",
-    )
-
     try:
-        result = await api.submit_diagnosis(session_id, text, tg_id)
+        async with ChatActionSender.typing(bot=msg.bot, chat_id=msg.chat.id):
+            result = await api.submit_diagnosis(session_id, text, tg_id)
     except api.BackendError as e:
         if e.status == 422:
             detail = e.detail
-            user_msg = (detail.get("message") if isinstance(detail, dict) else None) \
+            user_text = (detail.get("message") if isinstance(detail, dict) else None) \
                 or "Некорректный ввод. Попробуйте ещё раз."
-            await _render_diagnosis_prompt(
-                state, msg.bot, msg.chat.id, suffix=f"⚠️ <i>{user_msg}</i>",
-            )
+            await card.send(msg.bot, msg.chat.id, views.status_card(user_text))
             return
         if e.status in (502, 503, 504):
-            await _render_diagnosis_prompt(
-                state, msg.bot, msg.chat.id,
-                suffix="⏳ <i>Сервер перегружен. Подождите минуту и отправьте ещё раз.</i>",
+            await card.send(
+                msg.bot, msg.chat.id,
+                views.status_card("Сервер перегружен. Подождите минуту и отправьте ещё раз."),
             )
             return
         logger.warning("submit_diagnosis error: %s %s", e.status, e.detail)
         await _abort_session(msg.bot, msg.chat.id, state)
-        await card.render(
-            msg.bot, msg.chat.id, state,
+        await card.send(
+            msg.bot, msg.chat.id,
             views.error_card("Не удалось отправить диагноз."),
             reply_kb=back_to_menu_kb(),
         )
         return
 
-    # Готово: переход в карточку результата с reply-кнопкой «Готово».
     await state.set_state(None)
     await state.update_data(session_id=None, report=result)
-    await card.render(
-        msg.bot, msg.chat.id, state,
+    await card.send(
+        msg.bot, msg.chat.id,
         views.diagnosis_result_card(result),
         reply_kb=diagnosis_result_kb(),
     )
 
 
-# ── Вкладки отчёта (state=None, reply-клавиатура) ─────────────────────────────
+# ── Вкладки отчёта (state=None, reply-клавиатура persistент) ──────────────────
+# Reply-клавиатура отчёта уже установлена при первом показе, и сохраняется на
+# чат-уровне, поэтому здесь только шлём новое сообщение с содержимым вкладки.
 
-async def _render_report_tab(msg: Message, state: FSMContext, renderer) -> None:
+async def _send_report_tab(msg: Message, state: FSMContext, renderer) -> None:
+    await _delete_button_press(msg)
     data = await state.get_data()
     result = data.get("report") or {}
-    await _delete_button_press(msg)
-    await card.render(msg.bot, msg.chat.id, state, renderer(result))
+    await card.send(msg.bot, msg.chat.id, renderer(result))
 
 
 @router.message(StateFilter(None), F.text == BTN_TAB_ATTRIBUTES)
 async def on_btn_tab_attributes(msg: Message, state: FSMContext) -> None:
-    await _render_report_tab(msg, state, views.report_attributes_card)
+    await _send_report_tab(msg, state, views.report_attributes_card)
 
 
 @router.message(StateFilter(None), F.text == BTN_TAB_LANGUAGE)
 async def on_btn_tab_language(msg: Message, state: FSMContext) -> None:
-    await _render_report_tab(msg, state, views.report_language_card)
+    await _send_report_tab(msg, state, views.report_language_card)
 
 
 @router.message(StateFilter(None), F.text == BTN_TAB_SUMMARY)
 async def on_btn_tab_summary(msg: Message, state: FSMContext) -> None:
-    await _render_report_tab(msg, state, views.report_summary_card)
+    await _send_report_tab(msg, state, views.report_summary_card)
 
 
 @router.message(StateFilter(None), F.text == BTN_REPORT_DONE)
 async def on_btn_report_done(msg: Message, state: FSMContext) -> None:
-    """«Готово» — удаляем карточку отчёта и показываем чистое главное меню."""
+    """«Готово» — возвращаемся в главное меню."""
     from telegram.handlers.menu import show_main_menu
 
     await _delete_button_press(msg)
-    await card.delete(msg.bot, msg.chat.id, state)
     await state.set_state(None)
-    data = await state.get_data()
-    await state.set_data({
-        "reply_kb_cleared": data.get("reply_kb_cleared", False),
-        "reply_kb_active": data.get("reply_kb_active", False),
-    })
+    await state.set_data({})
     await show_main_menu(msg.bot, msg.chat.id, state)
 
 
@@ -457,16 +393,16 @@ async def cmd_diagnosis(msg: Message, state: FSMContext) -> None:
     """Алиас перехода к вводу диагноза (только контрольный режим)."""
     data = await state.get_data()
     if not data.get("session_id"):
-        await card.render(
-            msg.bot, msg.chat.id, state,
+        await card.send(
+            msg.bot, msg.chat.id,
             views.error_card("Сначала начните кейс через главное меню."),
             reply_kb=back_to_menu_kb(),
         )
         return
     if data.get("mode") == "training":
-        await _render_dialog(
-            state, msg.bot, msg.chat.id,
-            status="В тренировке диагноз не вводится — используйте кнопку «Завершить и получить отчёт».",
+        await card.send(
+            msg.bot, msg.chat.id,
+            views.status_card("В тренировке диагноз не вводится — нажмите «Завершить и получить отчёт»."),
         )
         return
     await state.set_state(DialogState.waiting_diagnosis)
@@ -474,9 +410,4 @@ async def cmd_diagnosis(msg: Message, state: FSMContext) -> None:
         patient=data.get("patient") or {},
         q_count=int(data.get("q_count", 0) or 0),
     )
-    await card.render(
-        msg.bot, msg.chat.id, state, text, reply_kb=diagnosis_reply_kb(),
-    )
-
-
-# Фолбэк-удаление случайного текста убрано: пусть остаётся в чате как обычно.
+    await card.send(msg.bot, msg.chat.id, text, reply_kb=diagnosis_reply_kb())

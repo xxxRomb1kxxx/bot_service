@@ -24,17 +24,17 @@ logger = logging.getLogger(__name__)
 
 
 async def show_main_menu(bot, chat_id: int, state: FSMContext) -> None:
-    """Сбрасывает диалоговое FSM-состояние и рендерит главное меню в карточке."""
+    """Сбрасывает диалоговое FSM-состояние и шлёт главное меню."""
     await state.set_state(None)
-    await card.render(bot, chat_id, state, views.WELCOME, reply_kb=main_menu_kb())
+    await card.send(bot, chat_id, views.WELCOME, reply_kb=main_menu_kb())
 
 
 async def show_help(bot, chat_id: int, state: FSMContext) -> None:
-    await card.render(bot, chat_id, state, views.HELP, reply_kb=help_kb())
+    await card.send(bot, chat_id, views.HELP, reply_kb=help_kb())
 
 
 async def show_mode_select(bot, chat_id: int, state: FSMContext) -> None:
-    await card.render(bot, chat_id, state, views.MODE_SELECT, reply_kb=mode_kb())
+    await card.send(bot, chat_id, views.MODE_SELECT, reply_kb=mode_kb())
 
 
 @router.message(CommandStart())
