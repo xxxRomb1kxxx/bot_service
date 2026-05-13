@@ -26,7 +26,8 @@ BTN_ABORT = "❌ Прервать кейс"
 BTN_DIAGNOSIS = "🩺 Поставить диагноз"
 BTN_CANCEL_DIAGNOSIS = "◀️ Вернуться к диалогу"
 
-# Отчёт по тренировке
+# Отчёт по тренировке / контрольному кейсу
+BTN_TAB_DIAGNOSIS = "🎯 Диагноз"
 BTN_TAB_ATTRIBUTES = "📋 Атрибуты"
 BTN_TAB_LANGUAGE = "📝 Язык"
 BTN_TAB_SUMMARY = "🏆 Итог"
@@ -97,15 +98,18 @@ def diagnosis_reply_kb() -> ReplyKeyboardMarkup:
 
 # ── Отчёт по тренировке ───────────────────────────────────────────────────────
 
-def report_kb() -> ReplyKeyboardMarkup:
-    """Вкладки отчёта: атрибуты / язык / итог + «готово»."""
-    return _kb(
-        [BTN_TAB_ATTRIBUTES, BTN_TAB_LANGUAGE, BTN_TAB_SUMMARY],
-        [BTN_REPORT_DONE],
-    )
+def report_kb(*, include_diagnosis: bool = False) -> ReplyKeyboardMarkup:
+    """Вкладки отчёта. В контрольном режиме добавляется вкладка «Диагноз»."""
+    rows: list[list[str]] = []
+    if include_diagnosis:
+        rows.append([BTN_TAB_DIAGNOSIS])
+    rows.append([BTN_TAB_ATTRIBUTES, BTN_TAB_LANGUAGE, BTN_TAB_SUMMARY])
+    rows.append([BTN_REPORT_DONE])
+    return _kb(*rows)
 
 
 def diagnosis_result_kb() -> ReplyKeyboardMarkup:
+    """Фолбэк, если отчёт после диагноза не удалось получить — только «Готово»."""
     return _kb([BTN_REPORT_DONE])
 
 

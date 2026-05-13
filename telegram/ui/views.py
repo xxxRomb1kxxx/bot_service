@@ -242,7 +242,7 @@ def report_language_card(result: dict) -> str:
     return "\n".join(lines)
 
 
-def report_summary_card(result: dict) -> str:
+def report_summary_card(result: dict, diagnosis: Optional[dict] = None) -> str:
     coverage_pct = round(float(result.get("coverage", 0.0)) * 100)
     total_pct = round(float(result.get("total_score", 0.0)) * 100)
     lq_grade = int((result.get("language_quality") or {}).get("grade", 0) or 0)
@@ -254,8 +254,13 @@ def report_summary_card(result: dict) -> str:
         "<b>Вкладка:</b> Итог",
         HR,
         "",
-        f"<b>📈 Покрытие атрибутов:</b> {coverage_pct}%",
     ]
+    if diagnosis:
+        is_correct = bool(diagnosis.get("is_correct"))
+        dx_icon = "✅" if is_correct else "❌"
+        dx_pct = round(float(diagnosis.get("score", 0.0)) * 100)
+        lines.append(f"<b>🎯 Диагноз:</b> {dx_icon} {dx_pct}%")
+    lines.append(f"<b>📈 Покрытие атрибутов:</b> {coverage_pct}%")
     if lq_grade > 0:
         lines.append(f"<b>📝 Качество языка:</b> {lq_grade}/5")
     else:

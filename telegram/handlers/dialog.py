@@ -24,6 +24,7 @@ from telegram.keyboards.inline import (
     BTN_FINISH,
     BTN_REPORT_DONE,
     BTN_TAB_ATTRIBUTES,
+    BTN_TAB_DIAGNOSIS,
     BTN_TAB_LANGUAGE,
     BTN_TAB_SUMMARY,
     back_to_menu_kb,
@@ -308,7 +309,10 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
 
     try:
         async with ChatActionSender.typing(bot=msg.bot, chat_id=msg.chat.id):
-            result = await api.submit_diagnosis(session_id, text, tg_id)
+            diagnosis = await api.submit_diagnosis(session_id, text, tg_id)
+            # Сразу подтягиваем полный отчёт (атрибуты + язык + итог), чтобы
+            # в контрольном режиме показывать те же вкладки, что в тренировке.
+            report = await _fetch_report_after_diagnosis(session_id, tg_id)
     except api.BackendError as e:
         if e.status == 422:
             detail = e.detail
@@ -332,12 +336,27 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
         return
 
     await state.set_state(None)
-    await state.update_data(session_id=None, report=result)
+    await state.update_data(session_id=None, diagnosis=diagnosis, report=report or {})
     await card.send(
         msg.bot, msg.chat.id,
-        views.diagnosis_result_card(result),
-        reply_kb=diagnosis_result_kb(),
+        views.diagnosis_result_card(diagnosis),
+        reply_kb=report_kb(include_diagnosis=True) if report else diagnosis_result_kb(),
     )
+
+
+async def _fetch_report_after_diagnosis(session_id: str, tg_id: int) -> Optional[dict]:
+    """Подтягивает полный отчёт после успешной отправки диагноза.
+
+    Если бэкенд уже считает сессию завершённой (404/409) или временно недоступен,
+    возвращаем None — пользователь увидит только результат по диагнозу.
+    """
+    try:
+        return await api.finish_consultation(session_id, tg_id)
+    except api.BackendError as e:
+        if e.status in (404, 409, 502, 503, 504):
+            logger.info("Report unavailable after diagnosis (%s): %s", e.status, e.detail)
+            return None
+        raise
 
 
 # ── Вкладки отчёта (state=None, reply-клавиатура persistент) ──────────────────
@@ -349,6 +368,14 @@ async def _send_report_tab(msg: Message, state: FSMContext, renderer) -> None:
     data = await state.get_data()
     result = data.get("report") or {}
     await card.send(msg.bot, msg.chat.id, renderer(result))
+
+
+@router.message(StateFilter(None), F.text == BTN_TAB_DIAGNOSIS)
+async def on_btn_tab_diagnosis(msg: Message, state: FSMContext) -> None:
+    await _delete_button_press(msg)
+    data = await state.get_data()
+    diagnosis = data.get("diagnosis") or {}
+    await card.send(msg.bot, msg.chat.id, views.diagnosis_result_card(diagnosis))
 
 
 @router.message(StateFilter(None), F.text == BTN_TAB_ATTRIBUTES)
@@ -363,7 +390,11 @@ async def on_btn_tab_language(msg: Message, state: FSMContext) -> None:
 
 @router.message(StateFilter(None), F.text == BTN_TAB_SUMMARY)
 async def on_btn_tab_summary(msg: Message, state: FSMContext) -> None:
-    await _send_report_tab(msg, state, views.report_summary_card)
+    await _delete_button_press(msg)
+    data = await state.get_data()
+    result = data.get("report") or {}
+    diagnosis = data.get("diagnosis")  # None в тренировочном режиме
+    await card.send(msg.bot, msg.chat.id, views.report_summary_card(result, diagnosis))
 
 
 @router.message(StateFilter(None), F.text == BTN_REPORT_DONE)
