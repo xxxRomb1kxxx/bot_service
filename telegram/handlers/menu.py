@@ -39,17 +39,18 @@ async def show_mode_select(bot, chat_id: int, state: FSMContext) -> None:
 
 @router.message(CommandStart())
 async def cmd_start(msg: Message, state: FSMContext) -> None:
-    # /start всегда возвращает в главное меню. Удаляем команду из чата, чтобы не мусорить.
-    await card.safe_delete(msg.bot, msg.chat.id, msg.message_id)
+    """`/start` всегда возвращает в главное меню. Команду из чата не удаляем."""
     logger.info("Start: user_id=%s", msg.from_user.id if msg.from_user else None)
     await show_main_menu(msg.bot, msg.chat.id, state)
 
 
 @router.message(Command("help"))
 async def cmd_help(msg: Message, state: FSMContext) -> None:
-    await card.safe_delete(msg.bot, msg.chat.id, msg.message_id)
     await show_help(msg.bot, msg.chat.id, state)
 
+
+# Нажатия reply-кнопок шлют свой текст-метку — её удаляем, чтобы чат не
+# засорялся дубликатами одинаковых строк.
 
 @router.message(StateFilter(None), F.text == BTN_TRAINER)
 async def on_btn_trainer(msg: Message, state: FSMContext) -> None:

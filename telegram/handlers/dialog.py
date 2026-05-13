@@ -1,9 +1,10 @@
 """
 Диалог с пациентом, ввод диагноза и финальный отчёт.
 
-Карточка показывает только текст беседы — управление вынесено в reply-клавиатуру
-у поля ввода, чтобы кнопки были рядом с местом печати. Пользовательские
-сообщения (вопросы пациенту и нажатия кнопок) удаляются после обработки.
+Карточка показывает текст беседы и обновляется по ходу. Сообщения пользователя
+(вопросы пациенту, ввод диагноза, команды) в чате не трогаем — пусть остаются,
+как в обычной переписке. Удаляем только нажатия reply-кнопок (текстовые метки
+вроде «✅ Завершить и получить отчёт»), чтобы не было дубликатов.
 """
 import asyncio
 import logging
@@ -44,7 +45,9 @@ POLL_MAX_ATTEMPTS = int(POLL_TIMEOUT_SEC / POLL_INTERVAL_SEC)
 
 # ── Утилиты ───────────────────────────────────────────────────────────────────
 
-async def _delete_user_msg(msg: Message) -> None:
+async def _delete_button_press(msg: Message) -> None:
+    """Удаляет нажатие reply-кнопки — текст-метка кнопки повторяется при каждом
+    нажатии и захламляет чат, поэтому стираем его сразу."""
     await card.safe_delete(msg.bot, msg.chat.id, msg.message_id)
 
 
@@ -109,7 +112,7 @@ async def _abort_session(bot, chat_id: int, state: FSMContext) -> None:
 @router.message(DialogState.waiting_question, F.text == BTN_FINISH)
 async def on_btn_finish(msg: Message, state: FSMContext) -> None:
     """Тренировочный режим: завершить и получить отчёт."""
-    await _delete_user_msg(msg)
+    await _delete_button_press(msg)
     data = await state.get_data()
     session_id = data.get("session_id")
     tg_id = data.get("tg_id")
@@ -160,7 +163,7 @@ async def on_btn_finish(msg: Message, state: FSMContext) -> None:
 @router.message(DialogState.waiting_question, F.text == BTN_DIAGNOSIS)
 async def on_btn_diagnosis(msg: Message, state: FSMContext) -> None:
     """Контрольный режим: переход к вводу диагноза."""
-    await _delete_user_msg(msg)
+    await _delete_button_press(msg)
     await state.set_state(DialogState.waiting_diagnosis)
     data = await state.get_data()
     text = views.diagnosis_prompt_card(
@@ -175,7 +178,7 @@ async def on_btn_diagnosis(msg: Message, state: FSMContext) -> None:
 @router.message(DialogState.waiting_diagnosis, F.text == BTN_CANCEL_DIAGNOSIS)
 async def on_btn_cancel_diagnosis(msg: Message, state: FSMContext) -> None:
     """Из ввода диагноза обратно в диалог."""
-    await _delete_user_msg(msg)
+    await _delete_button_press(msg)
     await state.set_state(DialogState.waiting_question)
     data = await state.get_data()
     text = views.dialog_card(
@@ -196,7 +199,7 @@ async def on_btn_cancel_diagnosis(msg: Message, state: FSMContext) -> None:
 @router.message(DialogState.waiting_diagnosis, F.text == BTN_ABORT)
 async def on_btn_abort(msg: Message, state: FSMContext) -> None:
     """Прервать кейс из любого состояния."""
-    await _delete_user_msg(msg)
+    await _delete_button_press(msg)
     from telegram.handlers.menu import show_main_menu
 
     await _abort_session(msg.bot, msg.chat.id, state)
@@ -211,7 +214,6 @@ async def handle_dialog(msg: Message, state: FSMContext) -> None:
     text = (msg.text or "").strip()
     logger.info("Dialog message: user_id=%s, text=%r", user_id, text[:100])
 
-    await _delete_user_msg(msg)
     if not text:
         return
 
@@ -344,7 +346,6 @@ async def _resolve_reply(queued: dict, session_id, tg_id, state, bot, chat_id) -
 async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
     user_id = msg.from_user.id if msg.from_user else None
     text = (msg.text or "").strip()
-    await _delete_user_msg(msg)
     if not text:
         return
 
@@ -405,7 +406,7 @@ async def handle_diagnosis(msg: Message, state: FSMContext) -> None:
 async def _render_report_tab(msg: Message, state: FSMContext, renderer) -> None:
     data = await state.get_data()
     result = data.get("report") or {}
-    await _delete_user_msg(msg)
+    await _delete_button_press(msg)
     await card.render(msg.bot, msg.chat.id, state, renderer(result))
 
 
@@ -429,7 +430,7 @@ async def on_btn_report_done(msg: Message, state: FSMContext) -> None:
     """«Готово» — удаляем карточку отчёта и показываем чистое главное меню."""
     from telegram.handlers.menu import show_main_menu
 
-    await _delete_user_msg(msg)
+    await _delete_button_press(msg)
     await card.delete(msg.bot, msg.chat.id, state)
     await state.set_state(None)
     data = await state.get_data()
@@ -445,7 +446,6 @@ async def on_btn_report_done(msg: Message, state: FSMContext) -> None:
 @router.message(Command("finish"))
 async def cmd_finish(msg: Message, state: FSMContext) -> None:
     """Алиас «прервать кейс»."""
-    await _delete_user_msg(msg)
     from telegram.handlers.menu import show_main_menu
 
     await _abort_session(msg.bot, msg.chat.id, state)
@@ -455,7 +455,6 @@ async def cmd_finish(msg: Message, state: FSMContext) -> None:
 @router.message(Command("diagnosis"))
 async def cmd_diagnosis(msg: Message, state: FSMContext) -> None:
     """Алиас перехода к вводу диагноза (только контрольный режим)."""
-    await _delete_user_msg(msg)
     data = await state.get_data()
     if not data.get("session_id"):
         await card.render(
@@ -480,10 +479,4 @@ async def cmd_diagnosis(msg: Message, state: FSMContext) -> None:
     )
 
 
-# ── Фолбэк: любой текст вне состояний удаляется, карточка не меняется ─────────
-
-@router.message(F.text)
-async def fallback_text(msg: Message, state: FSMContext) -> None:
-    """Если пользователь пишет что-то вне диалога/диагноза — просто удаляем
-    сообщение, чтобы чат оставался чистым."""
-    await _delete_user_msg(msg)
+# Фолбэк-удаление случайного текста убрано: пусть остаётся в чате как обычно.
